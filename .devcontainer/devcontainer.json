@@ -1,0 +1,43 @@
+{
+  "name": "agentop",
+  "dockerComposeFile": [
+    "compose.devcontainer.yaml"
+  ],
+  "service": "dev",
+  "runServices": [
+    "dev"
+  ],
+  "workspaceFolder": "/workspaces/agentop",
+  "shutdownAction": "none",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "initializeCommand": [
+    "bash",
+    "-lc",
+    "mkdir -p \"$HOME/.codex/sessions\" .devcontainer/local && if [ -f \"$HOME/.codex/AGENTS.md\" ]; then cp \"$HOME/.codex/AGENTS.md\" .devcontainer/local/AGENTS.md; else : > .devcontainer/local/AGENTS.md; fi"
+  ],
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "waitFor": "postCreateCommand",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "chatgpt.openOnStartup": true,
+        "rust-analyzer.check.command": "clippy",
+        "terminal.integrated.defaultLocation": "view",
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "workbench.startupEditor": "none"
+      },
+      "extensions": [
+        "openai.chatgpt",
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "esbenp.prettier-vscode",
+        "github.vscode-github-actions",
+        "mechatroner.rainbow-csv",
+        "hiztam.codex-history-viewer"
+      ]
+    }
+  }
+}

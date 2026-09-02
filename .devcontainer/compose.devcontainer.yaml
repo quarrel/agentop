@@ -1,0 +1,31 @@
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: ["sleep", "infinity"]
+    init: true
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      CODEX_UNSAFE_ALLOW_NO_SANDBOX: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ..:/workspaces/agentop
+      - agentop-codex-home:/home/vscode/.codex
+      - type: bind
+        source: ${HOME}/.codex/sessions
+        target: /home/vscode/.codex/sessions
+        bind:
+          create_host_path: false
+      - agentop-command-history:/commandhistory
+      - agentop-cargo-registry:/usr/local/cargo/registry
+      - agentop-cargo-git:/usr/local/cargo/git
+
+volumes:
+  agentop-codex-home:
+  agentop-command-history:
+  agentop-cargo-registry:
+  agentop-cargo-git:
