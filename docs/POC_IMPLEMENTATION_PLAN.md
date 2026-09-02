@@ -324,17 +324,13 @@ Use `agent_path` as the preferred display label and as a useful consistency chec
 
 ### 4. Pick the initial session simply
 
-The convenient default for development is:
+Selection precedence is:
 
-1. prefer sessions whose root `cwd` matches the current working directory;
-2. among those, choose the most recent root timestamp;
-3. if none match, choose the most recent root session overall.
+1. honour an explicit `--session <SESSION_ID>` exact match or unique prefix first;
+2. otherwise prefer the cohort whose root `cwd` exactly matches the current working directory; and
+3. fall back to all session groups when that cohort is empty.
 
-Also support:
-
-```text
-agentop --session <SESSION_ID>
-```
+Within either automatic cohort, choose the whole session group whose greatest rollout metadata timestamp is newest. Use a deterministic session identifier tie-break.
 
 This is enough for the POC. Do not build a session picker before the live tree works; add a basic picker later only if it is trivial.
 
@@ -671,8 +667,8 @@ Implement:
 - exact-schema catalogue lookup;
 - grouping by `session_id`;
 - root detection;
-- current-cwd/latest session selection;
-- explicit `--session` override; and
+- explicit `--session` override before automatic selection;
+- exact-current-cwd cohort then global fallback, choosing the group with the greatest rollout metadata timestamp; and
 - visible data-health counts for rejected metadata.
 
 Temporarily print a tree such as:
@@ -718,7 +714,7 @@ Implement:
 - detail panel;
 - quit and navigation keys.
 
-Use a simple depth-first flatten of the `parent_thread_id` graph. Sort siblings by start/session-meta timestamp, falling back to path/name.
+Use a simple depth-first flatten of the `parent_thread_id` graph with the root first. At every branch, order sibling subtrees by their greatest meaningful activity timestamp—`last_activity_at`, falling back to latest-turn start—newest first. Preserve hierarchy and use path/name then thread ID as deterministic tie-breaks.
 
 ### Step 6 — useful activity summaries
 
@@ -787,8 +783,11 @@ A handful of unit tests and tiny fixtures should cover:
 16. truncation/replacement rebuilding state rather than retaining stale reduction;
 17. malformed, oversized, and unknown records updating the correct data-health counters and bounded diagnostic samples with path/offset context even when version and ordinal are unavailable;
 18. rollout text containing ANSI/control bytes being safely sanitised and bounded;
-19. bookkeeping-only events such as `token_count` not updating `last_activity_at`; and
-20. operation against read-only fixture files.
+19. bookkeeping-only events such as `token_count` not updating `last_activity_at`;
+20. operation against read-only fixture files;
+21. explicit-session precedence, exact-current-cwd cohort selection, global fallback, and newest whole-group metadata timestamp selection;
+22. root-first hierarchical tree ordering by newest subtree activity, including direct siblings and deterministic ties while preserving selection by thread ID; and
+23. selected-session health excluding archive-wide discovery diagnostics from unrelated rollouts.
 
 Do not vendor entire real rollout files. Minimise representative lines into small, sanitised fixtures or inline JSON test data. Keep provenance outside fixture payloads: record which exact producer version and schema informed each fixture.
 
