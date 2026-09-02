@@ -14,13 +14,15 @@ The POC should answer, at a glance:
 - the most useful recent reasoning/tool/result text available in the rollout;
 - enough detail on selection to understand what an agent is doing without opening its raw rollout manually.
 
-This is a quick private POC. Keep the implementation small and easy to change. Do not build abstractions for hypothetical future backends or compatibility layers unless they directly simplify the POC.
+This is a quick private POC. Keep the implementation small and easy to change. Multi-version rollout input is already a real requirement, not a hypothetical backend: long-lived Codex processes can continue writing an older shape after the installed CLI advances. Keep compatibility work evidence-led and local to rollout ingestion rather than building a generic backend or plugin architecture.
 
 The rollout files are read-only inputs. They may grow while Agentop is reading them, and new rollout files may appear while the TUI is running.
 
 ## Known rollout behaviour to use
 
-The current target is Codex CLI 0.152.1 with multi-agent v2 and paginated history.
+Codex is changing rapidly, and a single Agentop process can observe rollouts produced by several Codex versions at once. Each rollout's `session_meta.payload.cli_version` identifies its producer. Do not assume the currently installed CLI produced every active or historical file.
+
+The initial semantic-coverage target is the Codex 0.149 family and later, including its prereleases. Codex 0.152.1 is the current reference version for the known three-level hello-world run, not a pinned application dependency. As an initial corpus snapshot, the mounted sessions contained 534 rollout files across 29 exact version strings; 392 were from the 0.149 family or later. Treat those counts as investigation evidence, not a permanent product assumption.
 
 Observed 0.152.1 rollouts already provide most of the data needed:
 
@@ -35,18 +37,79 @@ Observed 0.152.1 rollouts already provide most of the data needed:
   - the same parent/thread/path/role information inside `source.subagent.thread_spawn`.
 - Records have monotonically increasing `ordinal` values in paginated rollouts.
 - `task_started` and `task_complete` carry turn timing information.
-- `item_started` / `item_completed` expose useful typed items such as:
+- `response_item` tool-call records can appear before their matching outputs, joined by `call_id`. This is the dependable observed source of live activity in the reference run.
+- `item_completed` exposes useful typed items such as:
   - `Reasoning` with `summary_text`;
   - `AgentMessage` with commentary/final text;
   - `CommandExecution`;
   - `McpToolCall`;
   - `CollabAgentToolCall`;
   - `SubAgentActivity`.
+- The generated schema permits `item_started`, but the reference hello-world rollouts emitted none. Treat it as optional rather than the primary live-activity path.
 - Root rollouts also see direct-child `SubAgentActivity` events such as `started` and `completed`.
 - Parent/child task envelopes reveal sender, recipient, and message type, but v2 task payloads can be `encrypted_content`. Do not try to decrypt them.
 - Final agent results are often plaintext and can contain useful compact receipts such as `status=READY_FOR_ACCEPTANCE`, `status=BLOCKED`, validation results, blockers, and candidate identity.
 
-For the POC, treat this observed 0.152.1 shape as the main contract. Be tolerant of absent fields and unknown record/item variants: ignore what is not needed rather than modelling the entire Codex schema.
+No generated schema is a public stability guarantee. Use the exact internal schema captured from each available Codex version to describe permitted shapes, and use small real-rollout fixtures to establish observed sequencing and reducer semantics. The runtime parser must remain tolerant of absent fields, additional fields, and unknown variants.
+
+## Schema capture and compatibility
+
+The [official Codex App Server documentation](https://developers.openai.com/codex/app-server/#message-schema) states that generated schema artefacts are specific to the Codex version that produced them. The installed 0.152.1 CLI also provides an internal-schema generator for persisted rollout types.
+
+For each newly installed Codex version, capture all three useful surfaces:
+
+```bash
+codex --version
+codex app-server generate-json-schema --out ./schemas/staging/app-server/core
+codex app-server generate-json-schema --experimental --out ./schemas/staging/app-server/experimental
+codex app-server generate-internal-json-schema --out ./schemas/staging/internal
+```
+
+The no-flag app-server surface is called `core` here rather than `stable`: the generator command itself is currently labelled experimental. The surfaces have distinct purposes:
+
+- `app-server/core` describes the core app-server protocol exposed by that CLI.
+- `app-server/experimental` includes experimental app-server methods and fields and is useful for preparing future features.
+- `internal` describes persisted/internal structures; in 0.152.1 it includes `RolloutLine.json`, which is the directly relevant schema for this POC.
+
+Store captures by exact producer version:
+
+```text
+schemas/codex/
+  0.152.1/
+    manifest.json
+    app-server/
+      core/
+      experimental/
+    internal/
+      RolloutLine.json
+```
+
+A capture operation should:
+
+1. read `codex --version` before generation;
+2. generate all three surfaces into staging directories;
+3. read the version again and reject the capture if it changed;
+4. verify that every output is valid JSON Schema and that the internal bundle contains the expected rollout schema;
+5. hash every generated file; and
+6. record the exact version, commands, arguments, output filenames, and hashes in `manifest.json`.
+
+Preserve generated files unchanged. Do not store local configuration contents or secrets in the manifest. Never generate with the current binary and label the output as belonging to an older version; acquire and run the exact historical binary when possible. Failure to acquire every historical schema must not block best-effort ingestion.
+
+Use the archive in two ways:
+
+- Compare `core` with `experimental` within one version to see forthcoming app-server features.
+- Compare each surface across versions to identify additions, removals, and changed definitions.
+
+Do not generate a separate Rust model from every schema and do not validate every JSONL record against JSON Schema in the live rendering loop. Use schemas for provenance, offline compatibility analysis, fixture selection, and exact-version diagnostics. Keep runtime parsing as a small tolerant normaliser.
+
+Define compatibility claims precisely:
+
+- **Catalogued:** an exact schema capture is archived.
+- **Ingestable:** Agentop can discover, group, and tail the rollout without crashing; unknown data is reported.
+- **Semantically covered:** fixtures demonstrate correct topology, lifecycle, and activity reduction.
+- **Live verified:** Agentop has been exercised against a running process of that version.
+
+Select schemas only by exact `session_meta.payload.cli_version`. Never validate with the “nearest” schema. When no exact capture exists, continue with tolerant envelope parsing, show that schema coverage is missing, and retain enough type/version diagnostics to guide the next compatibility improvement.
 
 ## Deliberate POC boundaries
 
@@ -56,14 +119,14 @@ For this first version:
 - Do not require `CODEX_ROLLOUT_TRACE_ROOT`.
 - Do not use `codex debug trace-reduce`.
 - Do not add a trace backend.
-- Do not generate Rust types from the full `RolloutLine.json` schema.
+- Do not generate Rust types from any complete generated schema.
 - Do not persist Agentop state to a database.
 - Do not add a daemon or background service.
 - Do not add networking or remote-control support.
 - Do not add configuration files unless a real need appears during implementation.
 - Do not attempt to recover encrypted inter-agent task/message payloads.
 - Do not build a generic plugin/backend architecture.
-- Do not spend time supporting old rollout versions beyond graceful best-effort parsing where the fields happen to match.
+- Aim for semantic coverage of the 0.149 family and later; safely ingest older rollouts without promising correct interpretation or building exhaustive pre-0.149 adapters.
 
 A small set of Rust structs plus `serde_json::Value` for the evolving payloads is preferable to reproducing Codex's large internal type graph.
 
@@ -91,6 +154,7 @@ Keep this compact. A reasonable initial layout is:
 src/
   main.rs
   rollout.rs      # discovery + incremental JSONL reader
+  schema.rs       # captured-schema lookup and compatibility labels
   model.rs        # small internal state structs / reducer
   ui.rs           # ratatui drawing + key handling
 ```
@@ -109,6 +173,7 @@ struct SessionState {
     cwd: Option<PathBuf>,
     started_at: Option<OffsetDateTime>,
     agents: HashMap<String, AgentState>, // keyed by thread id
+    data_health: DataHealth,
 }
 
 struct AgentState {
@@ -118,22 +183,35 @@ struct AgentState {
     agent_role: Option<String>,
     agent_nickname: Option<String>,
     cli_version: Option<String>,
+    schema_available: bool,
 
-    status: AgentStatus,
-    turn_id: Option<String>,
-    started_at: Option<OffsetDateTime>,
-    completed_at: Option<OffsetDateTime>,
+    latest_turn: TurnState,
     last_event_at: Option<OffsetDateTime>,
 
-    current_activity: Option<String>,
+    in_flight_calls: HashMap<String, String>, // call id -> concise activity
     last_reasoning_summary: Option<String>,
     last_message: Option<String>,
     final_message: Option<String>,
+    result_status_claim: Option<String>,
 
     last_ordinal: Option<u64>,
 }
 
-enum AgentStatus {
+struct TurnState {
+    turn_id: Option<String>,
+    status: TurnStatus,
+    started_at: Option<OffsetDateTime>,
+    completed_at: Option<OffsetDateTime>,
+}
+
+struct DataHealth {
+    unknown_records: u64,
+    unknown_events: u64,
+    malformed_records: u64,
+    oversized_records: u64,
+}
+
+enum TurnStatus {
     Pending,
     Running,
     Completed,
@@ -142,33 +220,35 @@ enum AgentStatus {
 }
 ```
 
+The row status is the latest turn's lifecycle, not an irreversible status for the agent thread. A new `task_started` on an existing thread replaces `latest_turn` and clears prior in-flight calls, messages, reasoning, final text, and result claims. Bounded per-turn history can be added later if actual use warrants it; the POC must not display an earlier turn's result as though it belonged to the active turn.
+
 Keep status semantics conservative. If the rollout only tells us an agent is running and it has been quiet for a long time, display `RUNNING · last activity 2h ago`; do not infer `STALLED` or `BLOCKED` from silence.
 
-If a plaintext final result explicitly contains a compact line such as `status=BLOCKED`, it is useful to surface that as result metadata, but retain the underlying lifecycle state separately.
+Use the agent's own rollout as the primary source for its latest-turn lifecycle. Parent-side `SubAgentActivity` is supplementary evidence and a useful fallback while a child rollout is still pending discovery; it must not overwrite a contradictory child lifecycle. If a plaintext final result contains `status=BLOCKED`, surface it as an explicitly labelled result claim while retaining the lifecycle state separately.
 
 ## Rollout discovery
 
 ### 1. Locate the sessions directory
 
-Default to:
+Use this precedence:
 
-```text
-~/.codex/sessions
-```
+1. an explicit `--sessions-dir`;
+2. `$CODEX_HOME/sessions` when `CODEX_HOME` is set; and
+3. `~/.codex/sessions` otherwise.
 
-Support a simple override for development/testing, for example:
+For example:
 
 ```text
 agentop --sessions-dir /path/to/sessions
 ```
 
-Expand the user's home directory once at startup.
+Resolve the path once at startup, require it to be a readable directory, and display the resolved path in diagnostics. The sessions layout is an observed Codex behaviour rather than a public storage API.
 
 ### 2. Scan rollout files
 
 Recursively find `rollout-*.jsonl` files.
 
-For discovery, read only enough of each file to find its first `session_meta` line. Normally this is the first record. Do not parse every rollout merely to build the session list.
+For discovery, stream only enough of each file to find its first complete `session_meta` record. Normally this is the first record, but that record can itself be large because it embeds instructions. Do not parse every rollout merely to build the session list, and do not assume “first line” means a small read. Apply a documented fixed maximum record size that is comfortably above observed metadata.
 
 Extract the minimum useful metadata:
 
@@ -187,7 +267,7 @@ source.subagent.thread_spawn.depth
 
 ### 3. Group a multi-agent run
 
-For 0.152.1, group rollout files by `session_meta.payload.session_id`.
+Across the initially supported versions, group rollout files by `session_meta.payload.session_id`.
 
 The root is normally the thread where:
 
@@ -233,28 +313,36 @@ struct RolloutCursor {
 Rules:
 
 1. Open files read-only.
-2. On initial load of the selected session, parse the existing content once.
-3. Remember the byte offset reached.
+2. On initial load of the selected session, stream and parse the existing content once.
+3. Define `byte_offset` as the next unread file position. Bytes held in `partial_line` have already been read and are before that offset.
 4. On later ticks, compare file length with the stored offset.
-5. If bytes were appended, seek to the offset and read only the new bytes.
-6. Only parse complete newline-terminated JSON records.
-7. Keep an incomplete final line in `partial_line` until more bytes arrive.
-8. Use `ordinal` as a logical order/deduplication check when present.
-9. If one line is malformed or an unknown record type appears, skip/log it and continue rather than killing the TUI.
+5. If bytes were appended, seek to the offset, append new bytes to `partial_line`, advance the offset by exactly the bytes read, and extract newline-terminated records.
+6. Never parse an incomplete final record; retain it until more bytes arrive.
+7. Treat `ordinal` as per-rollout ordering/deduplication evidence when present. Do not impose a total cross-file order from ordinals.
+8. Stream records rather than loading a whole rollout into one string.
+9. Enforce a fixed maximum record size. If it is exceeded, discard through the next newline, increment `oversized_records` once, and continue.
+10. Classify a complete malformed JSON record separately from an incomplete EOF record. Count and surface the former; retry the latter.
+11. Count unknown record and event variants without retaining their potentially large payloads.
+12. Do not print ordinary diagnostics while the TUI owns the terminal; expose them through `DataHealth` and the detail view.
 
-Rollouts should normally only append. A tiny safety check for `file_len < byte_offset` can reset that cursor to zero; no elaborate file-rotation machinery is needed for the POC.
+Rollouts should normally only append. If `file_len < byte_offset`, rebuilding the selected session from its rollouts is simpler and safer than resetting only one cursor while leaving stale reduced state. No elaborate file-rotation machinery is needed for the POC.
 
 ## Discover children that appear after startup
 
 New child rollouts can be created while Agentop is running.
 
-Every roughly one second, rescan the sessions directory for new rollout filenames. For any unseen file:
+Every roughly one second, rescan the sessions directory for new rollout filenames. Track discovery as `pending` until a complete, valid `session_meta` record is available; discovering a filename is not enough to mark it admitted.
 
-- read its `session_meta`;
-- if its `session_id` matches the currently displayed run, add it to the session;
-- create its cursor;
-- parse its current contents;
+For each pending file:
+
+- retry after incomplete EOF rather than reporting malformed input;
+- surface a complete malformed or oversized metadata record through `DataHealth`;
+- if its `session_id` matches the displayed run, add it to the session;
+- create its cursor at the correctly consumed offset;
+- parse its remaining current contents exactly once; and
 - rebuild the flattened tree rows.
+
+A newly created file whose first line is still being written must eventually be admitted exactly once.
 
 Known rollout files can be checked for appended bytes more frequently, e.g. on a 200–500 ms TUI tick.
 
@@ -262,7 +350,7 @@ Start with polling. Do not add `notify` unless simple polling actually proves un
 
 ## Parsing strategy
 
-Do not define Rust enums for all ~11k lines of the generated Codex schema.
+Do not define Rust enums for the complete generated Codex schemas or one model per producer version.
 
 Parse each line initially as a lightweight envelope or `serde_json::Value`:
 
@@ -273,7 +361,9 @@ type
 payload
 ```
 
-Then switch only on the record/item types Agentop currently understands.
+Required envelope or metadata fields should be accessed directly and failures classified with file/version/ordinal context at the ingestion boundary. Optional evolving fields can remain optional. Then switch only on the record/item types Agentop currently understands.
+
+Look up an exact archived internal schema from the rollout's `cli_version` for coverage reporting and offline validation. The live reducer should not require that lookup to succeed. Add field aliases or version-specific normalisation only when a captured schema or real fixture demonstrates the need; do not guess compatibility from semver proximity.
 
 ### Records worth handling first
 
@@ -283,12 +373,15 @@ Creates/populates the agent node and tree relationship.
 
 #### `event_msg` → `task_started`
 
-Set:
+Replace the latest-turn state and clear turn-scoped activity:
 
 ```text
-status = RUNNING
-turn_id
-started_at
+latest_turn.status = RUNNING
+latest_turn.turn_id
+latest_turn.started_at
+latest_turn.completed_at = none
+clear in_flight_calls
+clear last reasoning/message/final/result-claim fields
 last_event_at
 ```
 
@@ -297,23 +390,30 @@ last_event_at
 Set:
 
 ```text
-status = COMPLETED
-completed_at
-final_message = last_agent_message
+latest_turn.status = COMPLETED
+latest_turn.completed_at
+final_message = last_message from this turn
+clear in_flight_calls
 last_event_at
 ```
 
 #### `event_msg` → `turn_aborted`
 
-If present, show `INTERRUPTED` unless the event contains a clearly terminal error state.
+If present, set `latest_turn.status = INTERRUPTED` unless the event contains a clearly terminal error state.
 
 #### `event_msg` → `error`
 
-Record a concise error and set `ERRORED` where appropriate.
+Record a concise error and set `latest_turn.status = ERRORED` where appropriate.
+
+#### `response_item` → tool calls and outputs
+
+Treat `custom_tool_call`, `function_call`, and other observed call records as the primary live-activity path. Record a concise activity keyed by `call_id`. On a matching output or other terminal record, remove that exact in-flight call and update recent activity/result text.
+
+Multiple calls can overlap. Derive the displayed current activity from the newest remaining in-flight call rather than clearing all activity when any output arrives.
 
 #### `event_msg` → `item_started` / `item_completed`
 
-Look at `payload.item.type`.
+Look at `payload.item.type` when present.
 
 Handle the following small subset:
 
@@ -325,19 +425,15 @@ Handle the following small subset:
 - `SubAgentActivity`
 - optionally `FileChange` if it falls out naturally
 
-For an `item_started`, set a concise current activity when possible.
+Use `item_started` when emitted, but do not depend on it. Use `item_completed` for richer typed summaries and to complete a matching in-flight call when an identifier is available. Deduplicate logical completion when both an item completion and a response output describe the same call.
 
-For an `item_completed`, update recent activity/result text.
+#### Direct `event_msg` variants
 
-#### Legacy/direct `event_msg` variants
+Captured schemas also permit direct events such as `sub_agent_activity`, `exec_command_begin/end`, and MCP begin/end events. Supporting observed equivalents is useful if a few simple match arms cover them, but add them from schema/fixture evidence rather than treating one current path as universal.
 
-The schema also permits direct events such as `sub_agent_activity`, `exec_command_begin/end`, and MCP begin/end events. Supporting the obvious equivalents is useful if a few simple match arms cover them, but do not let this delay the main 0.152.1 `item_*` path.
+#### `response_item` → agent messages and communication envelopes
 
-#### `response_item` → `agent_message`
-
-Useful for parent/child communications and final receipts.
-
-Store sender/recipient/message type if plaintext. If content includes `encrypted_content`, show only the available envelope, e.g.:
+Use plaintext agent messages for recent/final text and compact result claims. Store sender, recipient, and message type when available. If content includes `encrypted_content`, show only the available envelope, e.g.:
 
 ```text
 follow-up sent to /root/foo (payload encrypted)
@@ -362,7 +458,7 @@ Examples:
 - collaboration wait → `waiting on <N> agent(s)` if the item exposes receivers.
 - plaintext `FINAL_ANSWER` → `completed: <first useful receipt/status line>`.
 
-Keep the raw text available in the detail pane so the summaries do not need to be clever.
+Keep a bounded, sanitised source excerpt available in the detail pane so summaries do not need to be clever. Strip terminal control sequences and replace unsafe control characters before storing or rendering rollout-derived text.
 
 Do not create a general natural-language classification engine for the POC.
 
@@ -380,12 +476,12 @@ blocker=...
 
 A small helper may extract these exact `key=value` lines from plaintext final messages.
 
-Use it only as presentation sugar. Store the original message unchanged and fall back cleanly when a final message is ordinary prose.
+Use it only as presentation sugar. Keep a bounded, sanitised excerpt of the original message and fall back cleanly when a final message is ordinary prose.
 
 Useful display behaviour:
 
-- lifecycle `Completed` + receipt `status=BLOCKED` → row can display `COMPLETED · BLOCKED`;
-- lifecycle `Completed` + `status=READY_FOR_ACCEPTANCE` → `COMPLETED · READY_FOR_ACCEPTANCE`.
+- latest-turn lifecycle `Completed` + receipt `status=BLOCKED` → display `TURN COMPLETED · result claim: BLOCKED`;
+- latest-turn lifecycle `Completed` + `status=READY_FOR_ACCEPTANCE` → display `TURN COMPLETED · result claim: READY_FOR_ACCEPTANCE`.
 
 Do not make Agentop depend on MAP-specific receipts for basic operation.
 
@@ -435,16 +531,19 @@ full agent path
 thread id
 parent thread id
 role / nickname
-lifecycle status
+producer CLI version
+exact schema available/missing
+latest-turn lifecycle status
 started/completed timestamps or duration
 last activity timestamp
+in-flight/recent tool activity
 last reasoning summary
-current/last tool activity
 last plaintext message
-final message / receipt
+final message / labelled result claim
+session data-health counters
 ```
 
-Long text can be clipped initially. Scrolling the detail pane is useful if easy, but not required before the tree/live updates work.
+Long text must be bounded, sanitised, and clipped. Scrolling the detail pane is useful if easy, but not required before the tree/live updates work.
 
 ### Keys
 
@@ -464,29 +563,41 @@ No command palette or mouse support is needed.
 A straightforward single-threaded loop is enough:
 
 ```text
-initialize terminal
+enter raw mode + alternate screen through a terminal guard
 initial discovery + selected session load
 
 loop:
     poll keyboard event with ~250 ms timeout
     handle key if present
-    tail known selected-session rollouts
+    process a bounded record/byte budget from known rollouts
     periodically rescan for newly created rollout files
-    update derived state
-    draw
+    update derived state and data-health counters
+    draw, including a catching-up indicator when work remains
 
-restore terminal
+drop terminal guard to restore terminal
 ```
 
-Keep filesystem work bounded:
+Use an RAII terminal guard so every ordinary error path restores raw mode, cursor state, and the alternate screen. Add explicit resize and very-small-terminal handling.
 
-- discovery reads only `session_meta` from unrelated rollouts;
+Keep filesystem and per-tick work bounded:
+
+- discovery streams only through `session_meta` from unrelated rollouts;
 - only the selected session's files are parsed in full/tail mode;
-- subsequent updates read appended bytes only.
+- subsequent updates read appended bytes only;
+- each tick has a record or byte budget so an append burst cannot starve keyboard handling; and
+- stored text and activity history remain capped independently of rollout size.
 
 This should remain responsive even with old large orchestrator rollouts without needing an indexing service.
 
 ## Implementation sequence
+
+### Step 0 — capture schemas and inventory the corpus
+
+Capture the current CLI's core, experimental, and internal schemas with exact version provenance. Add a small repeatable capture command or script that stages outputs, verifies the version before and after generation, validates expected files, and writes hashes plus invocations to the manifest.
+
+Inventory the exact `cli_version` values present in the local rollout corpus. Acquire schemas for the high-volume 0.149–0.151 producer families where exact historical binaries remain obtainable, but do not block the first executable on a complete archive.
+
+Produce a small schema-diff summary that can list added/removed top-level rollout records, event variants, response-item variants, and app-server methods between two captures. It is an analysis aid, not a runtime compatibility engine.
 
 ### Step 1 — Rust executable scaffold
 
@@ -506,13 +617,15 @@ It may initially print discovered sessions rather than launch a TUI.
 
 Implement:
 
-- recursive rollout discovery;
-- first-line/session-meta reading;
-- minimal metadata extraction;
+- recursive rollout discovery with pending first-record handling;
+- bounded streaming through the first complete `session_meta`;
+- minimal metadata extraction including exact producer version;
+- exact-schema availability lookup;
 - grouping by `session_id`;
 - root detection;
 - current-cwd/latest session selection;
-- explicit `--session` override.
+- explicit `--session` override; and
+- visible data-health counts for rejected metadata.
 
 Temporarily print a tree such as:
 
@@ -526,22 +639,24 @@ Validate this against the existing hello-world session before moving on.
 
 ### Step 3 — parse selected session into `SessionState`
 
-Read all currently existing records for the selected session's rollouts and reduce the supported records into `AgentState`.
+Stream all currently existing records for the selected session's rollouts and reduce the supported records into `AgentState`.
 
-At the end, a debug print should show sensible lifecycle states, recent activity, and final result for the hello-world root/owner/candidate chain.
+At the end, a debug print should show sensible latest-turn states, in-flight/recent activity, producer/schema coverage, and labelled final result claims for the hello-world root/owner/candidate chain.
 
-Unknown records must be harmless.
+Unknown records must be harmless and counted. Validate response call/output pairing without relying on `item_started`, and validate that a second `task_started` reactivates an existing thread cleanly.
 
 ### Step 4 — incremental tailing
 
-Add `RolloutCursor` and append-only reading.
+Add `RolloutCursor`, bounded append-only reading, pending-file discovery, and selected-session rebuild on truncation.
 
 Verify with a running Codex session that:
 
 - Agentop can start while the session is active;
 - appended events appear without restarting Agentop;
-- a newly spawned child rollout is discovered and inserted into the tree;
-- incomplete final JSONL writes do not produce repeated visible errors.
+- a newly spawned child rollout is discovered and inserted exactly once, including when its first record was initially partial;
+- incomplete final JSONL writes do not produce repeated visible errors;
+- malformed/oversized records are surfaced without corrupting the TUI; and
+- an append burst leaves navigation responsive while a catching-up indicator is visible.
 
 ### Step 5 — Ratatui tree screen
 
@@ -571,9 +686,11 @@ Prioritize:
 
 Prefer the newest meaningful activity.
 
-### Step 7 — live smoke test
+### Step 7 — compatibility and live smoke tests
 
-Run a small 3-level Codex session similar to the hello-world run:
+First run fixture/corpus checks for representative 0.149-family, intermediate, and current-version rollouts. Report exact schema availability, unknown variants, and the highest demonstrated compatibility level for each tested version.
+
+Then run a small 3-level Codex session similar to the hello-world run:
 
 ```text
 /root
@@ -587,35 +704,51 @@ While it runs, verify Agentop shows:
 - owner appearing after spawn;
 - implementer appearing after the nested spawn;
 - correct parent/child hierarchy;
-- roles when supplied;
+- roles and producer versions when supplied;
 - activity changing while each agent works;
-- completion/result text after each child finishes;
+- completion and separately labelled result claims after each child finishes;
+- exact schema coverage or a clear missing-schema label; and
 - the final root completion.
 
-Then point Agentop at the existing long multi-day session and confirm that loading and navigating it remains usable. Do not tune performance further unless a concrete problem appears.
+Then point Agentop at the existing long multi-day session and confirm that loading and navigating it remains usable while newer-version sessions are also growing. Do not tune performance further unless a concrete problem appears.
 
 ## Small tests worth having
 
-Keep tests focused on parsing/reduction rather than the terminal UI.
+Keep tests focused on capture validation, parsing, reduction, and reader invariants rather than terminal styling.
 
-A handful of unit tests or a tiny fixture should cover:
+A handful of unit tests and tiny fixtures should cover:
 
-1. root `session_meta`;
-2. child `session_meta` with `parent_thread_id`, path, role, and depth;
-3. grouping root + child + grandchild by common `session_id`;
-4. `task_started` then `task_complete` lifecycle;
-5. `item_completed` Reasoning summary extraction;
-6. plaintext `FINAL_ANSWER` receipt extraction;
-7. encrypted `NEW_TASK` being accepted without attempting to decode it;
-8. incremental reader retaining a partial final JSON line and parsing it after completion.
+1. exact schema lookup by `cli_version`, plus explicit missing-schema status;
+2. capture manifest version/hash validation;
+3. root `session_meta`;
+4. child `session_meta` with `parent_thread_id`, path, role, and depth;
+5. grouping root + child + grandchild by common `session_id`;
+6. `task_started → task_complete → task_started` latest-turn reactivation;
+7. `response_item` call → matching output live activity without `item_started`;
+8. overlapping call identifiers completing independently;
+9. `item_completed` Reasoning summary extraction;
+10. plaintext final receipt retained as a result claim rather than lifecycle truth;
+11. encrypted `NEW_TASK` being accepted without attempting to decode it;
+12. incremental reader retaining a partial final JSON line and parsing it after completion;
+13. an incomplete first `session_meta` being retried and admitted exactly once;
+14. truncation/replacement rebuilding state rather than retaining stale reduction;
+15. malformed, oversized, and unknown records updating the correct data-health counters;
+16. rollout text containing ANSI/control bytes being safely sanitised and bounded; and
+17. operation against read-only fixture files.
 
-Do not vendor entire real rollout files. Minimize representative lines into a small fixture or inline JSON test data.
+Do not vendor entire real rollout files. Minimise representative lines into small, sanitised fixtures or inline JSON test data. Keep provenance outside fixture payloads: record which exact producer version and schema informed each fixture.
 
 ## POC acceptance check
 
-The POC is good enough when, from the `agentop` dev container, the user can run it against the shared Codex sessions and get a live screen that correctly reconstructs the current 0.152.1 multi-agent hierarchy.
+The POC is good enough when, from the Agentop dev container, the user can run it against the shared Codex sessions and get a live screen that:
 
-For the known hello-world run, it should reconstruct at least:
+- safely discovers, groups, and tails the available 0.149-family-and-later rollouts without assuming they match the installed CLI;
+- displays each agent's exact producer version and whether its schema is archived;
+- reports unknown/malformed/oversized input rather than silently presenting incomplete state;
+- claims semantic support only for versions covered by representative fixtures; and
+- remains responsive while selected rollouts grow.
+
+For the known 0.152.1 hello-world run, it should reconstruct at least:
 
 ```text
 /root
@@ -623,13 +756,15 @@ For the known hello-world run, it should reconstruct at least:
    └─ /root/hello_world_owner/hello_world_candidate
 ```
 
-and show the candidate as `map_implementer`, with useful recent/completion information from its own rollout.
+It should show the candidate as `map_implementer`, with useful live activity derived from call/output pairing and completion information from its own rollout.
 
-During a new live run it must update when rollout files grow and when a new child rollout file appears.
+At least one representative 0.149-family fixture must demonstrate correct discovery, topology, latest-turn lifecycle, and unknown-variant handling. Other rollouts from the 0.149 family and later may initially be merely ingestable; the UI must not overstate their semantic coverage.
 
-It must never write to, truncate, rename, move, lock for writing, or otherwise mutate anything under the sessions directory.
+During a new live run Agentop must update when rollout files grow and when a new child rollout file appears, even if that child initially exposes only a partial first record.
 
-After that works, stop and assess the POC before adding larger features.
+It must never write to, truncate, rename, move, lock for writing, or otherwise mutate anything under the sessions directory. Schema capture writes only beneath the repository's schema staging/archive path and is never performed by the live reader.
+
+After these checks pass, stop and assess the POC before adding larger features.
 
 ## Things explicitly left for later
 
@@ -637,15 +772,15 @@ Do not implement these as part of this plan:
 
 - trace-bundle support;
 - `trace-reduce` integration;
-- app-server integration;
+- live app-server integration (capturing and comparing its schemas is in scope);
 - remote-control functionality;
 - a database/index of historic rollouts;
 - cross-machine monitoring;
 - an LLM-based activity summarizer;
 - sophisticated task decryption/recovery;
-- broad backwards-compatibility machinery;
+- exhaustive version-specific adapters, particularly for pre-0.149 rollouts;
 - plugin systems;
 - configurable themes/layout frameworks;
 - elaborate performance work before the ordinary rollout approach is measured.
 
-Natural next experiments after the POC are likely to be session selection/history, better status summarization, and richer drill-down. Decide those from actual use rather than building them now.
+Natural next experiments after the POC are likely to be session selection/history, app-server features guided by core/experimental schema diffs, better status summarisation, and richer drill-down. Decide those from actual use rather than building them now.
