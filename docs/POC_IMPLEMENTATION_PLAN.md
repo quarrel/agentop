@@ -88,14 +88,17 @@ schemas/codex/
 
 A capture operation should:
 
-1. read `codex --version` before generation;
-2. generate all three surfaces into staging directories;
-3. read the version again and reject the capture if it changed;
-4. verify that every output is valid JSON Schema and that the internal bundle contains the expected rollout schema;
-5. hash every generated file; and
-6. record the exact version, commands, arguments, output filenames, and hashes in `manifest.json`.
+1. read and retain the raw `codex --version` output;
+2. parse the exact producer `cli_version` from that output and require it to match the archive-directory key used by rollout lookup;
+3. create a fresh, empty staging directory so files from an earlier generator run cannot enter the capture;
+4. generate all three surfaces into that staging directory;
+5. read the version again and reject the capture if either the raw output or parsed version changed;
+6. verify that every output is valid JSON Schema and that the internal bundle contains the expected rollout schema;
+7. hash every generated file;
+8. record the raw version output, parsed `cli_version`, commands, arguments, output filenames, and hashes in `manifest.json`; and
+9. atomically publish the completed capture under `schemas/codex/<cli_version>/`. If that target already exists, verify that it is identical or fail rather than overwriting it.
 
-Preserve generated files unchanged. Do not store local configuration contents or secrets in the manifest. Never generate with the current binary and label the output as belonging to an older version; acquire and run the exact historical binary when possible. Failure to acquire every historical schema must not block best-effort ingestion.
+The manifest's parsed `cli_version` and archive directory name must exactly match `session_meta.payload.cli_version`; for example, raw output such as `codex-cli 0.152.1` maps to the lookup key `0.152.1`. Preserve generated files unchanged. Do not store local configuration contents or secrets in the manifest. Never generate with the current binary and label the output as belonging to an older version; acquire and run the exact historical binary when possible. Failure to acquire every historical schema must not block best-effort ingestion.
 
 Use the archive in two ways:
 
@@ -194,6 +197,7 @@ struct AgentState {
     latest_turn: TurnState,
     last_activity_at: Option<OffsetDateTime>,
 
+    next_call_sequence: u64,
     in_flight_calls: HashMap<String, InFlightCall>,
     last_reasoning_summary: Option<String>,
     last_message: Option<String>,
@@ -207,6 +211,7 @@ struct InFlightCall {
     summary: String,
     started_at: Option<OffsetDateTime>,
     ordinal: Option<u64>,
+    sequence: u64, // strict reducer-assigned arrival order within the active turn
 }
 
 struct TurnState {
@@ -225,9 +230,12 @@ struct DataHealth {
 }
 
 struct DiagnosticSample {
+    rollout_path: PathBuf,
+    byte_offset: u64,
     cli_version: Option<String>,
-    kind: String,
+    kind: String, // bounded classification or unknown-variant name
     ordinal: Option<u64>,
+    detail: Option<String>, // bounded and sanitised; never the complete raw payload
 }
 
 enum CoverageLevel {
@@ -245,6 +253,10 @@ enum TurnStatus {
     Errored,
 }
 ```
+
+Assign `InFlightCall.sequence` when a call record is reduced and increment `next_call_sequence` even when an ordinal is absent or timestamps tie. Select the active call by the highest sequence rather than by `HashMap` iteration order. The ordinal and timestamp remain useful evidence and display data, but they are not required to provide a total order.
+
+A diagnostic sample must remain actionable even when malformed JSON provides neither a producer version nor an ordinal. Its rollout path and byte offset identify the input; `kind` and `detail` stay bounded and sanitised.
 
 The row status is the latest turn's lifecycle, not an irreversible status for the agent thread. A new `task_started` on an existing thread replaces `latest_turn` and clears prior in-flight calls, messages, reasoning, final text, and result claims. Bounded per-turn history can be added later if actual use warrants it; the POC must not display an earlier turn's result as though it belonged to the active turn.
 
@@ -394,13 +406,13 @@ Required envelope or metadata fields should be accessed directly and failures cl
 
 Look up an exact archived internal schema from the rollout's `cli_version` for coverage reporting and offline validation. The live reducer should not require that lookup to succeed. Add field aliases or version-specific normalisation only when a captured schema or real fixture demonstrates the need; do not guess compatibility from semver proximity.
 
-For child rollouts with `subagent_history_start_ordinal`, process `session_meta` normally but do not attribute earlier inherited records to that child's own lifecycle, activity, messages, or tools. The boundary is per rollout and should be applied before semantic reduction. Rollouts without the field retain the normal tolerant path.
+For a child rollout with `subagent_history_start_ordinal`, the first identifying `session_meta` header establishes that file's child identity and may bypass the boundary. For every other record, begin semantic reduction inclusively at the first ordinal greater than or equal to the boundary. Records below it—including inherited `session_meta` records—must not create or overwrite agent nodes or affect topology, lifecycle, activity, messages, or tools. While the reader is still below the boundary, an ordinal-less record cannot be classified as child-owned: do not project it, and retain a bounded diagnostic. Once the stream crosses the boundary, later ordinal-less records follow the normal tolerant path. Rollouts without the field retain the normal tolerant path.
 
 ### Records worth handling first
 
 #### `session_meta`
 
-Creates/populates the agent node and tree relationship, producer/schema metadata, and optional `subagent_history_start_ordinal` boundary.
+The first identifying header creates/populates the rollout's own agent node, tree relationship, producer/schema metadata, and optional `subagent_history_start_ordinal` boundary. An inherited pre-boundary `session_meta` must not create or update another agent node.
 
 #### `event_msg` → `task_started`
 
@@ -412,6 +424,7 @@ latest_turn.turn_id
 latest_turn.started_at
 latest_turn.completed_at = none
 clear in_flight_calls
+reset next_call_sequence
 clear last reasoning/message/final/result-claim fields
 last_activity_at
 ```
@@ -440,9 +453,9 @@ Record a concise error and set `latest_turn.status = ERRORED` where appropriate.
 
 #### `response_item` → tool calls and outputs
 
-Treat `custom_tool_call`, `function_call`, and other observed call records as the primary live-activity path. Record a concise `InFlightCall` keyed by `call_id`, including enough ordering information to choose the newest remaining call. On a matching output or other terminal record, remove that exact in-flight call and update recent activity/result text.
+Treat `custom_tool_call`, `function_call`, and other observed call records as the primary live-activity path. Record a concise `InFlightCall` keyed by `call_id`, assign the next reducer-local sequence, and retain the record ordinal/timestamp when available. On a matching output or other terminal record, remove that exact in-flight call and update recent activity/result text.
 
-Multiple calls can overlap. Derive the displayed current activity from the newest remaining in-flight call by ordinal/timestamp rather than clearing all activity when any output arrives.
+Multiple calls can overlap. Derive the displayed current activity from the remaining call with the highest reducer-assigned sequence rather than clearing all activity when any output arrives. Do not rely on `HashMap` iteration or ordinal/timestamp ties to choose the newest call.
 
 #### `event_msg` → `item_started` / `item_completed`
 
@@ -757,22 +770,22 @@ Keep tests focused on capture validation, parsing, reduction, and reader invaria
 A handful of unit tests and tiny fixtures should cover:
 
 1. exact schema lookup by `cli_version`, plus explicit missing-schema status;
-2. capture manifest version/hash validation;
+2. capture manifest raw/parsed version and hash validation, rejection of stale/non-empty staging, and exact archive-key lookup;
 3. root `session_meta`;
 4. child `session_meta` with `parent_thread_id`, path, role, depth, and optional `subagent_history_start_ordinal`;
 5. grouping root + child + grandchild by common `session_id`;
 6. `task_started → task_complete → task_started` latest-turn reactivation;
 7. `task_complete.last_agent_message` preferred over prior message state;
 8. `response_item` call → matching output live activity without `item_started`;
-9. overlapping call identifiers completing independently and preserving newest-call ordering;
+9. overlapping call identifiers completing independently and preserving deterministic newest-call ordering when ordinals are absent and timestamps tie;
 10. `item_completed` Reasoning summary extraction;
 11. plaintext final receipt retained as a result claim rather than lifecycle truth;
 12. encrypted `NEW_TASK` being accepted without attempting to decode it;
-13. inherited records before `subagent_history_start_ordinal` not being attributed to child activity/lifecycle;
+13. an inherited pre-boundary `session_meta` not creating or overwriting the parent node, and other inherited records not being attributed to child activity/lifecycle;
 14. incremental reader retaining a partial final JSON line and parsing it after completion;
 15. an incomplete first `session_meta` being retried and admitted exactly once;
 16. truncation/replacement rebuilding state rather than retaining stale reduction;
-17. malformed, oversized, and unknown records updating the correct data-health counters and bounded diagnostic samples;
+17. malformed, oversized, and unknown records updating the correct data-health counters and bounded diagnostic samples with path/offset context even when version and ordinal are unavailable;
 18. rollout text containing ANSI/control bytes being safely sanitised and bounded;
 19. bookkeeping-only events such as `token_count` not updating `last_activity_at`; and
 20. operation against read-only fixture files.
@@ -787,7 +800,7 @@ The POC is good enough when, from the Agentop dev container, the user can run it
 - displays each agent's exact producer version, whether its exact schema is catalogued, and the highest demonstrated compatibility level;
 - reports unknown/malformed/oversized input with bounded useful diagnostics rather than silently presenting incomplete state;
 - claims semantic support only for versions covered by representative fixtures;
-- does not attribute inherited pre-boundary rollout history to a child when Codex provides `subagent_history_start_ordinal`; and
+- does not let inherited pre-boundary records—including `session_meta`—create, overwrite, or otherwise affect projected agent state when Codex provides `subagent_history_start_ordinal`; and
 - remains responsive while selected rollouts grow.
 
 For the known 0.152.1 hello-world run, it should reconstruct at least:
