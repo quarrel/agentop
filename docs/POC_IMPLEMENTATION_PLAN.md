@@ -22,7 +22,7 @@ The rollout files are read-only inputs. They may grow while Agentop is reading t
 
 Codex is changing rapidly, and a single Agentop process can observe rollouts produced by several Codex versions at once. Each rollout's `session_meta.payload.cli_version` identifies its producer. Do not assume the currently installed CLI produced every active or historical file.
 
-The initial semantic-coverage target is the Codex 0.149 family and later, including its prereleases. Codex 0.152.1 is the current reference version for the known three-level hello-world run, not a pinned application dependency. As an initial corpus snapshot, the mounted sessions contained 534 rollout files across 29 exact version strings; 392 were from the 0.149 family or later. Treat those counts as investigation evidence, not a permanent product assumption.
+The initial **ingestion target** is the Codex 0.149 family and later, including its prereleases. Semantic coverage is narrower and evidence-based: Codex 0.152.1 is the current reference version for the known three-level hello-world run, and at least one representative 0.149-family fixture must demonstrate the older supported shape. Other versions may initially be merely ingestable until fixtures or live runs prove stronger semantics. As an initial corpus snapshot, the mounted sessions contained 534 rollout files across 29 exact version strings; 392 were from the 0.149 family or later. Treat those counts as investigation evidence, not a permanent product assumption.
 
 Observed 0.152.1 rollouts already provide most of the data needed:
 
@@ -34,9 +34,11 @@ Observed 0.152.1 rollouts already provide most of the data needed:
   - `agent_role`, e.g. `map_implementer`;
   - `agent_nickname`;
   - `source.subagent.thread_spawn.depth`;
-  - the same parent/thread/path/role information inside `source.subagent.thread_spawn`.
+  - the same parent/thread/path/role information inside `source.subagent.thread_spawn`;
+  - `subagent_history_start_ordinal`, which, when present, marks the first rollout ordinal belonging to the child's own projected history rather than inherited parent context.
 - Records have monotonically increasing `ordinal` values in paginated rollouts.
 - `task_started` and `task_complete` carry turn timing information.
+- `task_complete.last_agent_message` can carry the terminal plaintext result directly and should be preferred over reconstructed prior message state when present.
 - `response_item` tool-call records can appear before their matching outputs, joined by `call_id`. This is the dependable observed source of live activity in the reference run.
 - `item_completed` exposes useful typed items such as:
   - `Reasoning` with `summary_text`;
@@ -46,7 +48,7 @@ Observed 0.152.1 rollouts already provide most of the data needed:
   - `CollabAgentToolCall`;
   - `SubAgentActivity`.
 - The generated schema permits `item_started`, but the reference hello-world rollouts emitted none. Treat it as optional rather than the primary live-activity path.
-- Root rollouts also see direct-child `SubAgentActivity` events such as `started` and `completed`.
+- Root rollouts also see direct-child `SubAgentActivity` items such as `started` and `completed`.
 - Parent/child task envelopes reveal sender, recipient, and message type, but v2 task payloads can be `encrypted_content`. Do not try to decrypt them.
 - Final agent results are often plaintext and can contain useful compact receipts such as `status=READY_FOR_ACCEPTANCE`, `status=BLOCKED`, validation results, blockers, and candidate identity.
 
@@ -54,20 +56,20 @@ No generated schema is a public stability guarantee. Use the exact internal sche
 
 ## Schema capture and compatibility
 
-The [official Codex App Server documentation](https://developers.openai.com/codex/app-server/#message-schema) states that generated schema artefacts are specific to the Codex version that produced them. The installed 0.152.1 CLI also provides an internal-schema generator for persisted rollout types.
+The [official Codex App Server documentation](https://developers.openai.com/codex/app-server/#message-schema) states that generated schema artefacts are specific to the Codex version that produced them. It distinguishes the default stable API surface from the additional experimental surface. The installed 0.152.1 CLI also provides an internal-schema generator for persisted rollout types.
 
-For each newly installed Codex version, capture all three useful surfaces:
+For each newly installed Codex version worth cataloguing, capture all three useful surfaces:
 
 ```bash
 codex --version
-codex app-server generate-json-schema --out ./schemas/staging/app-server/core
+codex app-server generate-json-schema --out ./schemas/staging/app-server/stable
 codex app-server generate-json-schema --experimental --out ./schemas/staging/app-server/experimental
 codex app-server generate-internal-json-schema --out ./schemas/staging/internal
 ```
 
-The no-flag app-server surface is called `core` here rather than `stable`: the generator command itself is currently labelled experimental. The surfaces have distinct purposes:
+The surfaces have distinct purposes:
 
-- `app-server/core` describes the core app-server protocol exposed by that CLI.
+- `app-server/stable` describes the default stable app-server protocol surface produced by that CLI.
 - `app-server/experimental` includes experimental app-server methods and fields and is useful for preparing future features.
 - `internal` describes persisted/internal structures; in 0.152.1 it includes `RolloutLine.json`, which is the directly relevant schema for this POC.
 
@@ -78,7 +80,7 @@ schemas/codex/
   0.152.1/
     manifest.json
     app-server/
-      core/
+      stable/
       experimental/
     internal/
       RolloutLine.json
@@ -97,7 +99,7 @@ Preserve generated files unchanged. Do not store local configuration contents or
 
 Use the archive in two ways:
 
-- Compare `core` with `experimental` within one version to see forthcoming app-server features.
+- Compare `stable` with `experimental` within one version to see forthcoming app-server features.
 - Compare each surface across versions to identify additions, removals, and changed definitions.
 
 Do not generate a separate Rust model from every schema and do not validate every JSONL record against JSON Schema in the live rendering loop. Use schemas for provenance, offline compatibility analysis, fixture selection, and exact-version diagnostics. Keep runtime parsing as a small tolerant normaliser.
@@ -107,7 +109,9 @@ Define compatibility claims precisely:
 - **Catalogued:** an exact schema capture is archived.
 - **Ingestable:** Agentop can discover, group, and tail the rollout without crashing; unknown data is reported.
 - **Semantically covered:** fixtures demonstrate correct topology, lifecycle, and activity reduction.
-- **Live verified:** Agentop has been exercised against a running process of that version.
+- **Live verified:** Agentop has been exercised against a running process of that exact version.
+
+Cataloguing is orthogonal to runtime compatibility: an exact schema may be archived before Agentop has semantic fixtures for it, and a rollout may be ingestable even when its exact schema is missing.
 
 Select schemas only by exact `session_meta.payload.cli_version`. Never validate with the “nearest” schema. When no exact capture exists, continue with tolerant envelope parsing, show that schema coverage is missing, and retain enough type/version diagnostics to guide the next compatibility improvement.
 
@@ -126,7 +130,7 @@ For this first version:
 - Do not add configuration files unless a real need appears during implementation.
 - Do not attempt to recover encrypted inter-agent task/message payloads.
 - Do not build a generic plugin/backend architecture.
-- Aim for semantic coverage of the 0.149 family and later; safely ingest older rollouts without promising correct interpretation or building exhaustive pre-0.149 adapters.
+- Aim to **ingest** the 0.149 family and later safely. Claim semantic coverage only where representative fixtures or live runs prove it; do not build exhaustive pre-0.149 adapters.
 
 A small set of Rust structs plus `serde_json::Value` for the evolving payloads is preferable to reproducing Codex's large internal type graph.
 
@@ -183,18 +187,26 @@ struct AgentState {
     agent_role: Option<String>,
     agent_nickname: Option<String>,
     cli_version: Option<String>,
-    schema_available: bool,
+    schema_catalogued: bool,
+    coverage: CoverageLevel,
+    own_history_start_ordinal: Option<u64>,
 
     latest_turn: TurnState,
-    last_event_at: Option<OffsetDateTime>,
+    last_activity_at: Option<OffsetDateTime>,
 
-    in_flight_calls: HashMap<String, String>, // call id -> concise activity
+    in_flight_calls: HashMap<String, InFlightCall>,
     last_reasoning_summary: Option<String>,
     last_message: Option<String>,
     final_message: Option<String>,
     result_status_claim: Option<String>,
 
     last_ordinal: Option<u64>,
+}
+
+struct InFlightCall {
+    summary: String,
+    started_at: Option<OffsetDateTime>,
+    ordinal: Option<u64>,
 }
 
 struct TurnState {
@@ -209,6 +221,20 @@ struct DataHealth {
     unknown_events: u64,
     malformed_records: u64,
     oversized_records: u64,
+    recent_diagnostics: VecDeque<DiagnosticSample>, // bounded, e.g. last 20
+}
+
+struct DiagnosticSample {
+    cli_version: Option<String>,
+    kind: String,
+    ordinal: Option<u64>,
+}
+
+enum CoverageLevel {
+    Unknown,
+    Ingestable,
+    SemanticallyCovered,
+    LiveVerified,
 }
 
 enum TurnStatus {
@@ -225,6 +251,8 @@ The row status is the latest turn's lifecycle, not an irreversible status for th
 Keep status semantics conservative. If the rollout only tells us an agent is running and it has been quiet for a long time, display `RUNNING · last activity 2h ago`; do not infer `STALLED` or `BLOCKED` from silence.
 
 Use the agent's own rollout as the primary source for its latest-turn lifecycle. Parent-side `SubAgentActivity` is supplementary evidence and a useful fallback while a child rollout is still pending discovery; it must not overwrite a contradictory child lifecycle. If a plaintext final result contains `status=BLOCKED`, surface it as an explicitly labelled result claim while retaining the lifecycle state separately.
+
+`last_activity_at` should advance only for meaningful work/lifecycle activity that could reasonably answer “when did this agent last do something?” Do not refresh it for bookkeeping such as `token_count` alone.
 
 ## Rollout discovery
 
@@ -263,11 +291,12 @@ agent_path
 agent_role
 agent_nickname
 source.subagent.thread_spawn.depth
+subagent_history_start_ordinal
 ```
 
 ### 3. Group a multi-agent run
 
-Across the initially supported versions, group rollout files by `session_meta.payload.session_id`.
+Across the initial ingestion target, group rollout files by `session_meta.payload.session_id`.
 
 The root is normally the thread where:
 
@@ -323,7 +352,7 @@ Rules:
 9. Enforce a fixed maximum record size. If it is exceeded, discard through the next newline, increment `oversized_records` once, and continue.
 10. Classify a complete malformed JSON record separately from an incomplete EOF record. Count and surface the former; retry the latter.
 11. Count unknown record and event variants without retaining their potentially large payloads.
-12. Do not print ordinary diagnostics while the TUI owns the terminal; expose them through `DataHealth` and the detail view.
+12. Do not print ordinary diagnostics while the TUI owns the terminal; expose aggregate counts plus the bounded recent diagnostic samples through `DataHealth` and the detail view.
 
 Rollouts should normally only append. If `file_len < byte_offset`, rebuilding the selected session from its rollouts is simpler and safer than resetting only one cursor while leaving stale reduced state. No elaborate file-rotation machinery is needed for the POC.
 
@@ -365,11 +394,13 @@ Required envelope or metadata fields should be accessed directly and failures cl
 
 Look up an exact archived internal schema from the rollout's `cli_version` for coverage reporting and offline validation. The live reducer should not require that lookup to succeed. Add field aliases or version-specific normalisation only when a captured schema or real fixture demonstrates the need; do not guess compatibility from semver proximity.
 
+For child rollouts with `subagent_history_start_ordinal`, process `session_meta` normally but do not attribute earlier inherited records to that child's own lifecycle, activity, messages, or tools. The boundary is per rollout and should be applied before semantic reduction. Rollouts without the field retain the normal tolerant path.
+
 ### Records worth handling first
 
 #### `session_meta`
 
-Creates/populates the agent node and tree relationship.
+Creates/populates the agent node and tree relationship, producer/schema metadata, and optional `subagent_history_start_ordinal` boundary.
 
 #### `event_msg` → `task_started`
 
@@ -382,7 +413,7 @@ latest_turn.started_at
 latest_turn.completed_at = none
 clear in_flight_calls
 clear last reasoning/message/final/result-claim fields
-last_event_at
+last_activity_at
 ```
 
 #### `event_msg` → `task_complete`
@@ -392,24 +423,26 @@ Set:
 ```text
 latest_turn.status = COMPLETED
 latest_turn.completed_at
-final_message = last_message from this turn
+final_message = payload.last_agent_message when present, otherwise last_message from this turn
 clear in_flight_calls
-last_event_at
+last_activity_at
 ```
+
+Run the optional receipt parser against the selected `final_message`, not against stale prior-turn text.
 
 #### `event_msg` → `turn_aborted`
 
-If present, set `latest_turn.status = INTERRUPTED` unless the event contains a clearly terminal error state.
+If present, set `latest_turn.status = INTERRUPTED` unless the event contains a clearly terminal error state, and update `last_activity_at`.
 
 #### `event_msg` → `error`
 
-Record a concise error and set `latest_turn.status = ERRORED` where appropriate.
+Record a concise error and set `latest_turn.status = ERRORED` where appropriate. Treat it as meaningful activity when it concerns the active turn.
 
 #### `response_item` → tool calls and outputs
 
-Treat `custom_tool_call`, `function_call`, and other observed call records as the primary live-activity path. Record a concise activity keyed by `call_id`. On a matching output or other terminal record, remove that exact in-flight call and update recent activity/result text.
+Treat `custom_tool_call`, `function_call`, and other observed call records as the primary live-activity path. Record a concise `InFlightCall` keyed by `call_id`, including enough ordering information to choose the newest remaining call. On a matching output or other terminal record, remove that exact in-flight call and update recent activity/result text.
 
-Multiple calls can overlap. Derive the displayed current activity from the newest remaining in-flight call rather than clearing all activity when any output arrives.
+Multiple calls can overlap. Derive the displayed current activity from the newest remaining in-flight call by ordinal/timestamp rather than clearing all activity when any output arrives.
 
 #### `event_msg` → `item_started` / `item_completed`
 
@@ -532,15 +565,17 @@ thread id
 parent thread id
 role / nickname
 producer CLI version
-exact schema available/missing
+schema catalogued/missing
+compatibility level
 latest-turn lifecycle status
 started/completed timestamps or duration
-last activity timestamp
+last meaningful activity timestamp
 in-flight/recent tool activity
 last reasoning summary
 last plaintext message
 final message / labelled result claim
 session data-health counters
+recent bounded data-health diagnostics
 ```
 
 Long text must be bounded, sanitised, and clipped. Scrolling the detail pane is useful if easy, but not required before the tree/live updates work.
@@ -585,19 +620,19 @@ Keep filesystem and per-tick work bounded:
 - only the selected session's files are parsed in full/tail mode;
 - subsequent updates read appended bytes only;
 - each tick has a record or byte budget so an append burst cannot starve keyboard handling; and
-- stored text and activity history remain capped independently of rollout size.
+- stored text, diagnostics, and activity history remain capped independently of rollout size.
 
 This should remain responsive even with old large orchestrator rollouts without needing an indexing service.
 
 ## Implementation sequence
 
-### Step 0 — capture schemas and inventory the corpus
+### Step 0 — capture reference schemas and inventory the corpus
 
-Capture the current CLI's core, experimental, and internal schemas with exact version provenance. Add a small repeatable capture command or script that stages outputs, verifies the version before and after generation, validates expected files, and writes hashes plus invocations to the manifest.
+Capture the current CLI's stable, experimental, and internal schemas with exact version provenance. Add a small repeatable capture command or script that stages outputs, verifies the version before and after generation, validates expected files, and writes hashes plus invocations to the manifest.
 
-Inventory the exact `cli_version` values present in the local rollout corpus. Acquire schemas for the high-volume 0.149–0.151 producer families where exact historical binaries remain obtainable, but do not block the first executable on a complete archive.
+Inventory the exact `cli_version` values present in the local rollout corpus. For the POC, capture 0.152.1 and one representative 0.149-family producer version when its exact historical binary is readily obtainable. Do not block the first executable on broader historical schema acquisition.
 
-Produce a small schema-diff summary that can list added/removed top-level rollout records, event variants, response-item variants, and app-server methods between two captures. It is an analysis aid, not a runtime compatibility engine.
+Broad acquisition of 0.150/0.151 and other historical schema sets, and a generic cross-version schema-diff summary tool, belong in Step 7 unless they fall out trivially from the capture work.
 
 ### Step 1 — Rust executable scaffold
 
@@ -619,8 +654,8 @@ Implement:
 
 - recursive rollout discovery with pending first-record handling;
 - bounded streaming through the first complete `session_meta`;
-- minimal metadata extraction including exact producer version;
-- exact-schema availability lookup;
+- minimal metadata extraction including exact producer version and optional child-history boundary;
+- exact-schema catalogue lookup;
 - grouping by `session_id`;
 - root detection;
 - current-cwd/latest session selection;
@@ -643,7 +678,7 @@ Stream all currently existing records for the selected session's rollouts and re
 
 At the end, a debug print should show sensible latest-turn states, in-flight/recent activity, producer/schema coverage, and labelled final result claims for the hello-world root/owner/candidate chain.
 
-Unknown records must be harmless and counted. Validate response call/output pairing without relying on `item_started`, and validate that a second `task_started` reactivates an existing thread cleanly.
+Unknown records must be harmless and counted. Validate response call/output pairing without relying on `item_started`, validate overlapping calls completing independently, validate that `task_complete.last_agent_message` wins when present, validate that a second `task_started` reactivates an existing thread cleanly, and validate that inherited pre-boundary child history is not attributed to the child when `subagent_history_start_ordinal` is present.
 
 ### Step 4 — incremental tailing
 
@@ -684,11 +719,13 @@ Prioritize:
 4. agent message/final result;
 5. collaboration wait/spawn activity if present.
 
-Prefer the newest meaningful activity.
+Prefer the newest meaningful activity. Do not let bookkeeping-only events refresh the displayed activity age.
 
-### Step 7 — compatibility and live smoke tests
+### Step 7 — compatibility, optional schema analysis, and live smoke tests
 
-First run fixture/corpus checks for representative 0.149-family, intermediate, and current-version rollouts. Report exact schema availability, unknown variants, and the highest demonstrated compatibility level for each tested version.
+First run fixture/corpus checks for representative 0.149-family, intermediate, and current-version rollouts. Report exact schema catalogue status, unknown variants, and the highest demonstrated compatibility level for each tested version.
+
+If useful after the core reader works, acquire additional high-volume historical schema sets whose exact binaries remain obtainable. A small schema-diff summary may list added/removed top-level rollout records, event variants, response-item variants, and app-server methods between two captures. Keep it an analysis aid, not a runtime compatibility engine.
 
 Then run a small 3-level Codex session similar to the hello-world run:
 
@@ -707,7 +744,8 @@ While it runs, verify Agentop shows:
 - roles and producer versions when supplied;
 - activity changing while each agent works;
 - completion and separately labelled result claims after each child finishes;
-- exact schema coverage or a clear missing-schema label; and
+- exact schema catalogue status or a clear missing-schema label;
+- compatibility level without overstating semantic coverage; and
 - the final root completion.
 
 Then point Agentop at the existing long multi-day session and confirm that loading and navigating it remains usable while newer-version sessions are also growing. Do not tune performance further unless a concrete problem appears.
@@ -721,20 +759,23 @@ A handful of unit tests and tiny fixtures should cover:
 1. exact schema lookup by `cli_version`, plus explicit missing-schema status;
 2. capture manifest version/hash validation;
 3. root `session_meta`;
-4. child `session_meta` with `parent_thread_id`, path, role, and depth;
+4. child `session_meta` with `parent_thread_id`, path, role, depth, and optional `subagent_history_start_ordinal`;
 5. grouping root + child + grandchild by common `session_id`;
 6. `task_started → task_complete → task_started` latest-turn reactivation;
-7. `response_item` call → matching output live activity without `item_started`;
-8. overlapping call identifiers completing independently;
-9. `item_completed` Reasoning summary extraction;
-10. plaintext final receipt retained as a result claim rather than lifecycle truth;
-11. encrypted `NEW_TASK` being accepted without attempting to decode it;
-12. incremental reader retaining a partial final JSON line and parsing it after completion;
-13. an incomplete first `session_meta` being retried and admitted exactly once;
-14. truncation/replacement rebuilding state rather than retaining stale reduction;
-15. malformed, oversized, and unknown records updating the correct data-health counters;
-16. rollout text containing ANSI/control bytes being safely sanitised and bounded; and
-17. operation against read-only fixture files.
+7. `task_complete.last_agent_message` preferred over prior message state;
+8. `response_item` call → matching output live activity without `item_started`;
+9. overlapping call identifiers completing independently and preserving newest-call ordering;
+10. `item_completed` Reasoning summary extraction;
+11. plaintext final receipt retained as a result claim rather than lifecycle truth;
+12. encrypted `NEW_TASK` being accepted without attempting to decode it;
+13. inherited records before `subagent_history_start_ordinal` not being attributed to child activity/lifecycle;
+14. incremental reader retaining a partial final JSON line and parsing it after completion;
+15. an incomplete first `session_meta` being retried and admitted exactly once;
+16. truncation/replacement rebuilding state rather than retaining stale reduction;
+17. malformed, oversized, and unknown records updating the correct data-health counters and bounded diagnostic samples;
+18. rollout text containing ANSI/control bytes being safely sanitised and bounded;
+19. bookkeeping-only events such as `token_count` not updating `last_activity_at`; and
+20. operation against read-only fixture files.
 
 Do not vendor entire real rollout files. Minimise representative lines into small, sanitised fixtures or inline JSON test data. Keep provenance outside fixture payloads: record which exact producer version and schema informed each fixture.
 
@@ -743,9 +784,10 @@ Do not vendor entire real rollout files. Minimise representative lines into smal
 The POC is good enough when, from the Agentop dev container, the user can run it against the shared Codex sessions and get a live screen that:
 
 - safely discovers, groups, and tails the available 0.149-family-and-later rollouts without assuming they match the installed CLI;
-- displays each agent's exact producer version and whether its schema is archived;
-- reports unknown/malformed/oversized input rather than silently presenting incomplete state;
-- claims semantic support only for versions covered by representative fixtures; and
+- displays each agent's exact producer version, whether its exact schema is catalogued, and the highest demonstrated compatibility level;
+- reports unknown/malformed/oversized input with bounded useful diagnostics rather than silently presenting incomplete state;
+- claims semantic support only for versions covered by representative fixtures;
+- does not attribute inherited pre-boundary rollout history to a child when Codex provides `subagent_history_start_ordinal`; and
 - remains responsive while selected rollouts grow.
 
 For the known 0.152.1 hello-world run, it should reconstruct at least:
@@ -756,7 +798,7 @@ For the known 0.152.1 hello-world run, it should reconstruct at least:
    └─ /root/hello_world_owner/hello_world_candidate
 ```
 
-It should show the candidate as `map_implementer`, with useful live activity derived from call/output pairing and completion information from its own rollout.
+It should show the candidate as `map_implementer`, with useful live activity derived from call/output pairing and completion information from its own rollout. Where `task_complete.last_agent_message` is present, that is the preferred final result source.
 
 At least one representative 0.149-family fixture must demonstrate correct discovery, topology, latest-turn lifecycle, and unknown-variant handling. Other rollouts from the 0.149 family and later may initially be merely ingestable; the UI must not overstate their semantic coverage.
 
@@ -783,4 +825,4 @@ Do not implement these as part of this plan:
 - configurable themes/layout frameworks;
 - elaborate performance work before the ordinary rollout approach is measured.
 
-Natural next experiments after the POC are likely to be session selection/history, app-server features guided by core/experimental schema diffs, better status summarisation, and richer drill-down. Decide those from actual use rather than building them now.
+Natural next experiments after the POC are likely to be session selection/history, app-server features guided by stable/experimental schema diffs, better status summarisation, and richer drill-down. Decide those from actual use rather than building them now.
