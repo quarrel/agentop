@@ -26,6 +26,7 @@ use std::{
 const EVENT_POLL: Duration = Duration::from_millis(250);
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
+const INITIAL_LOADING_WORK_WINDOW: Duration = Duration::from_millis(100);
 const RENDER_TEXT_LIMIT: usize = 256;
 const _: fn(&SessionGroup, &SessionState) -> Vec<String> = crate::rollout::tree_lines;
 
@@ -39,6 +40,10 @@ fn update_interval(loading: bool) -> Duration {
 
 fn event_wait(elapsed: Duration, loading: bool) -> Duration {
     EVENT_POLL.min(update_interval(loading).saturating_sub(elapsed))
+}
+
+fn loading_work_window_open(loading: bool, elapsed: Duration) -> bool {
+    loading && elapsed < INITIAL_LOADING_WORK_WINDOW
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -270,7 +275,7 @@ fn event_loop(
 ) -> Result<TreeExit> {
     let mut ui = UiState::default();
     let mut dirty = true;
-    let mut last_update = Instant::now();
+    let mut last_update_started = Instant::now();
     loop {
         let rows = flatten(&reader.group, &reader.state);
         ui.synchronise(&rows);
@@ -293,7 +298,7 @@ fn event_loop(
         }
 
         let loading = reader.is_loading();
-        if event::poll(event_wait(last_update.elapsed(), loading))
+        if event::poll(event_wait(last_update_started.elapsed(), loading))
             .context("poll terminal events")?
         {
             match event::read().context("read terminal event")? {
@@ -309,9 +314,9 @@ fn event_loop(
                         dirty = true;
                     }
                     KeyCode::Char('r') => {
+                        last_update_started = Instant::now();
                         let outcome = reader.poll().context("rescan selected session")?;
                         note_poll(&mut ui, outcome);
-                        last_update = Instant::now();
                         dirty = true;
                     }
                     _ => {}
@@ -321,12 +326,25 @@ fn event_loop(
             }
         }
 
-        let update_interval = update_interval(reader.is_loading());
-        if last_update.elapsed() >= update_interval {
-            let outcome = reader.poll().context("update selected session")?;
-            last_update = Instant::now();
-            note_poll(&mut ui, outcome);
-            dirty = true;
+        let loading = reader.is_loading();
+        let update_interval = update_interval(loading);
+        if last_update_started.elapsed() >= update_interval {
+            let work_started = Instant::now();
+            last_update_started = work_started;
+            loop {
+                let outcome = reader.poll().context("update selected session")?;
+                note_poll(&mut ui, outcome);
+                dirty = true;
+
+                if !loading_work_window_open(reader.is_loading(), work_started.elapsed()) {
+                    break;
+                }
+                if event::poll(Duration::ZERO)
+                    .context("poll terminal events during initial loading")?
+                {
+                    break;
+                }
+            }
         }
     }
 }
@@ -1017,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_update_interval_and_event_wait_are_deadline_bounded() {
+    fn loading_update_cadence_counts_elapsed_work_and_bounds_event_wait() {
         assert_eq!(update_interval(true), Duration::from_millis(50));
         assert_eq!(update_interval(false), Duration::from_secs(1));
         assert_eq!(event_wait(Duration::ZERO, true), Duration::from_millis(50));
@@ -1026,6 +1044,7 @@ mod tests {
             Duration::from_millis(30)
         );
         assert_eq!(event_wait(Duration::from_millis(50), true), Duration::ZERO);
+        assert_eq!(event_wait(Duration::from_millis(75), true), Duration::ZERO);
         assert_eq!(
             event_wait(Duration::ZERO, false),
             Duration::from_millis(250)
@@ -1035,6 +1054,11 @@ mod tests {
             Duration::from_millis(100)
         );
         assert_eq!(event_wait(Duration::from_secs(1), false), Duration::ZERO);
+
+        assert!(loading_work_window_open(true, Duration::ZERO));
+        assert!(loading_work_window_open(true, Duration::from_millis(99)));
+        assert!(!loading_work_window_open(true, Duration::from_millis(100)));
+        assert!(!loading_work_window_open(false, Duration::ZERO));
     }
     fn rendered_agent(
         agent: &AgentState,
