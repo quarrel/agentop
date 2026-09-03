@@ -1,6 +1,6 @@
 use crate::model::{
     AgentInteraction, AgentState, CoverageLevel, DataHealth, InteractionKind, SessionState,
-    StaleEvidence, ToolInteractionState, TurnStatus,
+    StaleEvidence, ToolInteractionState, TurnStatus, CONTENT_TEXT_LIMIT,
 };
 use crate::rollout::{self, Discovery, PollOutcome, SelectedReader, SessionGroup};
 use anyhow::{Context, Result};
@@ -31,7 +31,20 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
 const INITIAL_LOADING_WORK_WINDOW: Duration = Duration::from_millis(100);
 const RENDER_TEXT_LIMIT: usize = 256;
+const DETAIL_RENDER_TEXT_LIMIT: usize = CONTENT_TEXT_LIMIT;
 const _: fn(&SessionGroup, &SessionState) -> Vec<String> = crate::rollout::tree_lines;
+
+fn list_panel_height(total_height: u16, row_count: usize, max_percent: u16) -> u16 {
+    const FIXED_HEIGHT: u16 = 3;
+    const MIN_DETAIL_HEIGHT: u16 = 3;
+    let space_cap = total_height.saturating_sub(FIXED_HEIGHT + MIN_DETAIL_HEIGHT);
+    let percentage_cap = total_height.saturating_mul(max_percent) / 100;
+    let cap = space_cap.min(percentage_cap.max(1));
+    let desired = u16::try_from(row_count)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    desired.min(cap).max(1)
+}
 
 fn update_interval(loading: bool) -> Duration {
     if loading {
@@ -851,11 +864,12 @@ fn draw(
         return;
     }
 
+    let agent_panel_height = list_panel_height(area.height, rows.len(), 42);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
-            Constraint::Percentage(42),
+            Constraint::Length(agent_panel_height),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
@@ -959,6 +973,7 @@ fn draw(
 fn interaction_kind(kind: InteractionKind) -> &'static str {
     match kind {
         InteractionKind::Lifecycle => "lifecycle",
+        InteractionKind::Context => "context",
         InteractionKind::Tool => "tool",
         InteractionKind::Reasoning => "reasoning",
         InteractionKind::Message => "message",
@@ -969,6 +984,7 @@ fn interaction_kind(kind: InteractionKind) -> &'static str {
 fn interaction_style(kind: InteractionKind, palette: Palette) -> Style {
     match kind {
         InteractionKind::Lifecycle => palette.title(),
+        InteractionKind::Context => palette.warning(),
         InteractionKind::Tool => palette.warning(),
         InteractionKind::Reasoning => palette.model(),
         InteractionKind::Message => palette.good(),
@@ -1072,7 +1088,7 @@ fn interaction_detail_lines(
     if interaction.kind == InteractionKind::Tool {
         lines.push(labelled_line(
             "tool",
-            render_text(&interaction.summary),
+            render_detail_text(&interaction.summary),
             palette,
         ));
         if let Some(state_text) = tool_state_text(interaction, now) {
@@ -1090,7 +1106,7 @@ fn interaction_detail_lines(
         }
         lines.push(labelled_line(
             "content",
-            render_text(&interaction.summary),
+            render_detail_text(&interaction.summary),
             palette,
         ));
     }
@@ -1158,19 +1174,20 @@ fn draw_history(
     palette: Palette,
 ) {
     let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Percentage(55),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(area);
     let agent = state
         .agents
         .get(&history.thread_id)
         .expect("history view references a selected agent");
+    let interaction_panel_height = list_panel_height(area.height, agent.interactions.len(), 55);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(interaction_panel_height),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
     let progress = if loading {
         " · loading history…"
     } else if catching_up {
@@ -1253,6 +1270,48 @@ fn draw_history(
     );
 }
 
+fn exact_tokens(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
+fn context_pressure_style(percent: u16, palette: Palette) -> Style {
+    if percent >= 85 {
+        palette.error()
+    } else if percent >= 70 {
+        palette.warning()
+    } else {
+        palette.metadata()
+    }
+}
+
+fn context_change(current: u64, previous: u64) -> String {
+    if current > previous {
+        format!(
+            "+{} since previous observation",
+            exact_tokens(current - previous)
+        )
+    } else if current < previous {
+        format!(
+            "-{} since previous observation",
+            exact_tokens(previous - current)
+        )
+    } else {
+        "unchanged since previous observation".into()
+    }
+}
+
+fn context_usage_is_actionable(agent: &AgentState, stale_evidence: Option<StaleEvidence>) -> bool {
+    stale_evidence.is_none() && agent.latest_turn.status != TurnStatus::Completed
+}
+
 fn tree_line(
     row: &TreeRow,
     agent: &AgentState,
@@ -1290,6 +1349,17 @@ fn tree_line(
         ));
     }
     spans.push(Span::styled(format!("{status}  "), status_style));
+    if let Some(usage) = agent
+        .context_usage
+        .as_ref()
+        .filter(|_| context_usage_is_actionable(agent, stale_evidence))
+    {
+        let percent = usage.percent();
+        spans.push(Span::styled(
+            format!("CTX {percent}%  "),
+            context_pressure_style(percent, palette),
+        ));
+    }
     if let Some(last_activity) = agent.last_activity_at {
         spans.push(Span::styled(age(last_activity), palette.metadata()));
     }
@@ -1325,9 +1395,14 @@ fn detail_lines(
         .iter()
         .find(|metadata| metadata.thread_id == agent.thread_id);
 
+    let displayed_agent_path = agent
+        .agent_path
+        .as_deref()
+        .map(|path| path.strip_prefix("/root/").unwrap_or(path))
+        .unwrap_or("(unnamed)");
     let mut identity = format!(
         "{} · thread {}",
-        render_text(agent.agent_path.as_deref().unwrap_or("(unnamed)")),
+        render_text(displayed_agent_path),
         render_text(&agent.thread_id),
     );
     if let Some(parent) = agent.parent_thread_id.as_deref() {
@@ -1403,13 +1478,83 @@ fn detail_lines(
         ]));
     }
 
+    if let Some(usage) = agent
+        .context_usage
+        .as_ref()
+        .filter(|_| context_usage_is_actionable(agent, stale_evidence))
+    {
+        let percent = usage.percent();
+        let mut context = vec![Span::styled("context: ", palette.title())];
+        push_detail_value(
+            &mut context,
+            format!(
+                "{} / {} input tokens ({percent}%)",
+                exact_tokens(usage.input_tokens),
+                exact_tokens(usage.model_context_window)
+            ),
+            context_pressure_style(percent, palette),
+        );
+        if let Some(previous) = usage.previous_input_tokens {
+            push_detail_value(
+                &mut context,
+                context_change(usage.input_tokens, previous),
+                palette.metadata(),
+            );
+        }
+        if let Some(observed_at) = usage.observed_at {
+            push_detail_value(
+                &mut context,
+                format!("observed {}", timestamp(Some(observed_at))),
+                palette.metadata(),
+            );
+        }
+        lines.push(Line::from(context));
+
+        let mut counters = Vec::new();
+        if let Some(cached) = usage.cached_input_tokens {
+            counters.push(format!("{} cached input", exact_tokens(cached)));
+        }
+        if let Some(output) = usage.output_tokens {
+            counters.push(format!("{} output", exact_tokens(output)));
+        }
+        if let Some(reasoning) = usage.reasoning_output_tokens {
+            counters.push(format!("{} reasoning output", exact_tokens(reasoning)));
+        }
+        if let Some(cumulative) = usage.cumulative_tokens {
+            counters.push(format!("{} cumulative", exact_tokens(cumulative)));
+        }
+        if !counters.is_empty() {
+            lines.push(labelled_line("token usage", counters.join(" · "), palette));
+        }
+
+        let guidance = if percent >= 85 {
+            Some((
+                "context pressure is high; finish or hand off bounded work",
+                palette.error(),
+            ))
+        } else if percent >= 70 {
+            Some((
+                "context pressure is rising; plan a bounded handoff",
+                palette.warning(),
+            ))
+        } else {
+            None
+        };
+        if let Some((guidance, style)) = guidance {
+            lines.push(Line::from(vec![
+                Span::styled("guidance: ", palette.title()),
+                Span::styled(guidance, style),
+            ]));
+        }
+    }
+
     let message = agent.last_message.as_deref();
     let final_message = agent.final_message.as_deref();
     if let Some(activity) = agent
         .current_activity()
         .filter(|activity| agent.active_call_evidence().is_some() || message != Some(*activity))
     {
-        let mut activity = render_text(activity);
+        let mut activity = render_detail_text(activity);
         if let Some((started, ordinal)) = agent.active_call_evidence() {
             if let Some(started) = started {
                 activity.push_str(&format!(
@@ -1426,20 +1571,28 @@ fn detail_lines(
     if let Some(summary) = agent.last_reasoning_summary.as_deref() {
         lines.push(labelled_line(
             "reasoning summary",
-            render_text(summary),
+            render_detail_text(summary),
             palette,
         ));
     }
     if let Some(message) = message {
-        lines.push(labelled_line("message", render_text(message), palette));
+        lines.push(labelled_line(
+            "message",
+            render_detail_text(message),
+            palette,
+        ));
     }
     if let Some(final_message) =
         final_message.filter(|final_message| message != Some(*final_message))
     {
-        lines.push(labelled_line("final", render_text(final_message), palette));
+        lines.push(labelled_line(
+            "final",
+            render_detail_text(final_message),
+            palette,
+        ));
     }
     if let Some(claim) = agent.result_status_claim.as_deref() {
-        lines.push(labelled_line("result", render_text(claim), palette));
+        lines.push(labelled_line("result", render_detail_text(claim), palette));
     }
 
     let health = &state.data_health;
@@ -1540,17 +1693,25 @@ fn age(time: DateTime<Utc>) -> String {
     }
 }
 
-fn render_text(value: &str) -> String {
+fn render_text_with_limit(value: &str, limit: usize) -> String {
     let mut characters = value
         .chars()
         .filter(|character| !character.is_control())
-        .take(RENDER_TEXT_LIMIT + 1)
+        .take(limit + 1)
         .collect::<Vec<_>>();
-    if characters.len() > RENDER_TEXT_LIMIT {
-        characters.truncate(RENDER_TEXT_LIMIT - 1);
+    if characters.len() > limit {
+        characters.truncate(limit - 1);
         characters.push('…');
     }
     characters.into_iter().collect()
+}
+
+fn render_text(value: &str) -> String {
+    render_text_with_limit(value, RENDER_TEXT_LIMIT)
+}
+
+fn render_detail_text(value: &str) -> String {
+    render_text_with_limit(value, DETAIL_RENDER_TEXT_LIMIT)
 }
 
 fn abbreviate(value: &str) -> String {
@@ -1625,6 +1786,25 @@ mod tests {
     }
 
     #[test]
+    fn details_use_root_relative_agent_paths() {
+        let (group, mut state) = fixture();
+        let child = state.agents.get_mut("child").unwrap();
+        child.agent_path = Some("/root/owner/child".into());
+
+        let details = detail_lines(
+            Some(child),
+            &SessionState::default(),
+            &group,
+            None,
+            Palette::new(ColorMode::None),
+        );
+        assert_eq!(
+            line_text(&details[0]),
+            "agent: owner/child · thread child · parent root"
+        );
+        assert_eq!(child.agent_path.as_deref(), Some("/root/owner/child"));
+    }
+    #[test]
     fn waiting_status_renders_in_tree_and_detail_with_exact_precedence() {
         let (group, state) = fixture();
         let mut agent = state.agents["root"].clone();
@@ -1669,6 +1849,156 @@ mod tests {
         let (tree, detail) = rendered_agent(&agent, &group, &state);
         assert!(!tree.contains("WAITING ON AGENT"));
         assert!(!detail.contains("WAITING ON AGENT"));
+    }
+
+    #[test]
+    fn context_usage_renders_pressure_details_and_compaction_history() {
+        let (group, mut state) = fixture();
+        let root = state.agents.get_mut("root").unwrap();
+        for record in [
+            serde_json::json!({
+                "timestamp": "2026-09-03T10:00:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 38_000},
+                        "model_context_window": 258_400
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-09-03T10:01:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 39_773,
+                            "cached_input_tokens": 39_424,
+                            "output_tokens": 59,
+                            "reasoning_output_tokens": 12
+                        },
+                        "total_token_usage": {"total_tokens": 1_313_563},
+                        "model_context_window": 258_400
+                    }
+                }
+            }),
+        ] {
+            assert!(crate::model::reduce(root, &record));
+        }
+
+        let rows = flatten(&group, &state, false);
+        let palette = Palette::new(ColorMode::Auto);
+        let root = state.agents.get("root").unwrap();
+        let tree = tree_line(&rows[0], root, None, palette);
+        assert!(line_text(&tree).contains("CTX 15%"));
+        let details = detail_lines(Some(root), &state, &group, None, palette);
+        let details = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(details.contains(
+            "context: 39,773 / 258,400 input tokens (15%) · +1,773 since previous observation · observed 2026-09-03 10:01:00 UTC"
+        ));
+        assert!(details.contains(
+            "token usage: 39,424 cached input · 59 output · 12 reasoning output · 1,313,563 cumulative"
+        ));
+
+        state.agents.get_mut("root").unwrap().latest_turn.status = TurnStatus::Completed;
+        let root = state.agents.get("root").unwrap();
+        assert!(root.context_usage.is_some());
+        assert!(!line_text(&tree_line(&rows[0], root, None, palette)).contains("CTX "));
+        let completed_details = detail_lines(Some(root), &state, &group, None, palette)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!completed_details.contains("context:"));
+        assert!(!completed_details.contains("token usage:"));
+        assert!(!completed_details.contains("context pressure"));
+
+        state.agents.get_mut("root").unwrap().latest_turn.status = TurnStatus::Running;
+        let root = state.agents.get("root").unwrap();
+        let stale_evidence = Some(StaleEvidence::LaterSessionActivity);
+        assert!(!line_text(&tree_line(&rows[0], root, stale_evidence, palette)).contains("CTX "));
+        let stale_details = detail_lines(Some(root), &state, &group, stale_evidence, palette)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!stale_details.contains("context:"));
+        assert!(!stale_details.contains("token usage:"));
+        assert!(!stale_details.contains("context pressure"));
+
+        let root = state.agents.get_mut("root").unwrap();
+        assert!(crate::model::reduce(
+            root,
+            &serde_json::json!({
+                "timestamp": "2026-09-03T10:02:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 200_000},
+                        "model_context_window": 258_400
+                    }
+                }
+            })
+        ));
+        let warning_tree = tree_line(&rows[0], root, None, palette);
+        assert_eq!(
+            warning_tree
+                .spans
+                .iter()
+                .find(|span| span.content.contains("CTX 77%"))
+                .unwrap()
+                .style
+                .fg,
+            Some(Color::Yellow)
+        );
+
+        assert!(crate::model::reduce(
+            root,
+            &serde_json::json!({
+                "timestamp": "2026-09-03T10:03:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 230_000},
+                        "model_context_window": 258_400
+                    }
+                }
+            })
+        ));
+        let error_tree = tree_line(&rows[0], root, None, palette);
+        assert_eq!(
+            error_tree
+                .spans
+                .iter()
+                .find(|span| span.content.contains("CTX 89%"))
+                .unwrap()
+                .style
+                .fg,
+            Some(Color::Red)
+        );
+
+        assert!(crate::model::reduce(
+            root,
+            &serde_json::json!({
+                "timestamp": "2026-09-03T10:04:00Z",
+                "type": "event_msg",
+                "payload": {"type": "context_compacted"}
+            })
+        ));
+        assert!(root.context_usage.is_none());
+        let compacted = root.interactions.back().unwrap();
+        assert_eq!(
+            line_text(&interaction_line(
+                compacted,
+                Utc::now(),
+                Palette::new(ColorMode::None)
+            )),
+            "2026-09-03 10:04:00  context: COMPACTED"
+        );
     }
 
     #[test]
@@ -2139,6 +2469,74 @@ mod tests {
         assert_eq!(ui.history.as_ref().unwrap().selected_sequence, selected);
         assert!(ui.close_history());
         assert!(ui.history.is_none());
+    }
+
+    #[test]
+    fn details_and_interaction_content_use_available_space() {
+        let (group, mut state) = fixture();
+        let message = format!("{}VISIBLE_TAIL", "detail ".repeat(80));
+        assert!(message.chars().count() > RENDER_TEXT_LIMIT);
+        assert!(message.chars().count() < DETAIL_RENDER_TEXT_LIMIT);
+        assert!(crate::model::reduce(
+            state.agents.get_mut("root").unwrap(),
+            &serde_json::json!({
+                "ordinal": 20,
+                "timestamp": "2026-09-03T10:05:00Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": message}
+            }),
+        ));
+
+        let rows = flatten(&group, &state, false);
+        let mut ui = UiState::default();
+        ui.synchronise(&rows);
+        assert_eq!(list_panel_height(30, rows.len(), 42), 4);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &group,
+                    &state,
+                    &rows,
+                    &ui,
+                    false,
+                    Palette::new(ColorMode::None),
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("VISIBLE_TAIL"));
+
+        ui.open_history(&state);
+        assert_eq!(list_panel_height(30, 1, 55), 3);
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &group,
+                    &state,
+                    &rows,
+                    &ui,
+                    false,
+                    Palette::new(ColorMode::None),
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("VISIBLE_TAIL"));
     }
 
     #[test]

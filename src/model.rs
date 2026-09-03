@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 const TEXT_LIMIT: usize = 512;
+pub(crate) const CONTENT_TEXT_LIMIT: usize = 2_048;
 const DIAGNOSTIC_LIMIT: usize = 20;
 const INTERACTION_LIMIT: usize = 256;
 const AGENT_LIST_SNAPSHOT_LIMIT: usize = 64;
@@ -43,6 +44,29 @@ impl Default for TurnState {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextUsage {
+    pub observed_at: Option<DateTime<Utc>>,
+    pub input_tokens: u64,
+    pub previous_input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub cumulative_tokens: Option<u64>,
+    pub model_context_window: u64,
+}
+
+impl ContextUsage {
+    pub fn percent(&self) -> u16 {
+        if self.model_context_window == 0 {
+            return 0;
+        }
+        ((u128::from(self.input_tokens) * 100 / u128::from(self.model_context_window)).min(999))
+            as u16
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InFlightCall {
     pub tool_name: String,
@@ -56,6 +80,7 @@ pub struct InFlightCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionKind {
     Lifecycle,
+    Context,
     Tool,
     Reasoning,
     Message,
@@ -177,6 +202,7 @@ pub struct AgentState {
     pub own_history_start_ordinal: Option<u64>,
     pub latest_turn: TurnState,
     pub last_activity_at: Option<DateTime<Utc>>,
+    pub context_usage: Option<ContextUsage>,
     pub next_call_sequence: u64,
     pub in_flight_calls: HashMap<String, InFlightCall>,
     pub interactions: VecDeque<AgentInteraction>,
@@ -208,6 +234,7 @@ impl AgentState {
             own_history_start_ordinal: None,
             latest_turn: TurnState::default(),
             last_activity_at: None,
+            context_usage: None,
             next_call_sequence: 0,
             in_flight_calls: HashMap::new(),
             interactions: VecDeque::new(),
@@ -265,7 +292,7 @@ impl AgentState {
         self.interactions.push_back(AgentInteraction {
             sequence,
             kind,
-            summary: sanitise(summary.as_ref()),
+            summary: sanitise_content(summary.as_ref()),
             timestamp,
             ordinal,
             tool_state,
@@ -281,7 +308,7 @@ impl AgentState {
         timestamp: Option<DateTime<Utc>>,
         ordinal: Option<u64>,
     ) -> u64 {
-        let summary = sanitise(summary.as_ref());
+        let summary = sanitise_content(summary.as_ref());
         if let Some(previous) = self.interactions.back_mut().filter(|previous| {
             previous.kind == kind
                 && previous.kind != InteractionKind::Tool
@@ -442,7 +469,7 @@ pub fn parse_time(v: Option<&Value>) -> Option<DateTime<Utc>> {
     }
     v.as_i64().and_then(|s| DateTime::from_timestamp(s, 0))
 }
-pub fn sanitise(input: &str) -> String {
+fn sanitise_with_limit(input: &str, limit: usize) -> String {
     let mut out = String::new();
     let mut escape = false;
     let mut truncated = false;
@@ -472,19 +499,27 @@ pub fn sanitise(input: &str) -> String {
             _ if ch.is_control() => '�',
             _ => ch,
         };
-        if out.len() + emitted.len_utf8() > TEXT_LIMIT {
+        if out.len() + emitted.len_utf8() > limit {
             truncated = true;
             break;
         }
         out.push(emitted);
     }
     if truncated {
-        while out.len() + '…'.len_utf8() > TEXT_LIMIT {
+        while out.len() + '…'.len_utf8() > limit {
             out.pop();
         }
         out.push('…');
     }
     out
+}
+
+pub fn sanitise(input: &str) -> String {
+    sanitise_with_limit(input, TEXT_LIMIT)
+}
+
+fn sanitise_content(input: &str) -> String {
+    sanitise_with_limit(input, CONTENT_TEXT_LIMIT)
 }
 fn plain_text(content: &Value) -> Option<String> {
     let parts = content.as_array()?;
@@ -494,6 +529,33 @@ fn plain_text(content: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     (!text.is_empty()).then_some(text)
+}
+
+fn parse_context_usage(
+    payload: &Value,
+    observed_at: Option<DateTime<Utc>>,
+    previous: Option<&ContextUsage>,
+) -> Option<ContextUsage> {
+    let info = payload.get("info")?;
+    let last = info.get("last_token_usage")?;
+    let input_tokens = last.get("input_tokens")?.as_u64()?;
+    let model_context_window = info.get("model_context_window")?.as_u64()?;
+    if model_context_window == 0 {
+        return None;
+    }
+    Some(ContextUsage {
+        observed_at,
+        input_tokens,
+        previous_input_tokens: previous.map(|usage| usage.input_tokens),
+        cached_input_tokens: last.get("cached_input_tokens").and_then(Value::as_u64),
+        output_tokens: last.get("output_tokens").and_then(Value::as_u64),
+        reasoning_output_tokens: last.get("reasoning_output_tokens").and_then(Value::as_u64),
+        cumulative_tokens: info
+            .get("total_token_usage")
+            .and_then(|usage| usage.get("total_tokens"))
+            .and_then(Value::as_u64),
+        model_context_window,
+    })
 }
 
 fn canonical_agent_path_or_none(path: &str) -> Option<String> {
@@ -564,7 +626,7 @@ fn reasoning_summary(payload: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
-        .map(|text| sanitise(&text.replace("**", "")))
+        .map(|text| sanitise_content(&text.replace("**", "")))
 }
 
 fn receipt_claim(text: &str) -> Option<String> {
@@ -588,7 +650,7 @@ fn summary_for_call(payload: &Value) -> String {
     } else {
         name.to_owned()
     };
-    sanitise(&summary)
+    sanitise_content(&summary)
 }
 
 fn summary_for_exec(input: &str) -> Option<String> {
@@ -752,7 +814,10 @@ fn direct_tool_detail(name: &str, payload: &Value) -> Option<String> {
         .as_ref()
         .or_else(|| payload.get("arguments"))
         .and_then(Value::as_object)?;
-    arguments.get(key).and_then(Value::as_str).map(sanitise)
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(sanitise_content)
 }
 
 fn js_string_property(source: &str, key: &str) -> Option<String> {
@@ -792,7 +857,7 @@ fn js_string_property(source: &str, key: &str) -> Option<String> {
                 if bytes[finish] == b'"' {
                     return serde_json::from_str::<String>(&source[cursor..=finish])
                         .ok()
-                        .map(|value| sanitise(&value));
+                        .map(|value| sanitise_content(&value));
                 }
                 finish += 1;
             }
@@ -813,7 +878,7 @@ fn js_string_property(source: &str, key: &str) -> Option<String> {
             } else if character == '\\' {
                 escaped = true;
             } else if character == quote as char {
-                return Some(sanitise(&value));
+                return Some(sanitise_content(&value));
             } else {
                 value.push(character);
             }
@@ -938,7 +1003,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 agent.close_in_flight_calls(agent.latest_turn.completed_at);
                 if let Some(raw) = payload.get("last_agent_message").and_then(Value::as_str) {
                     agent.result_status_claim = receipt_claim(raw);
-                    agent.final_message = Some(sanitise(raw));
+                    agent.final_message = Some(sanitise_content(raw));
                 } else {
                     agent.final_message = agent.last_message.clone();
                 }
@@ -993,7 +1058,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                             .and_then(|a| {
                                 a.iter().filter_map(Value::as_str).find(|s| !s.is_empty())
                             })
-                            .map(|s| sanitise(&s.replace("**", "")));
+                            .map(|s| sanitise_content(&s.replace("**", "")));
                         if let Some(summary) = summary {
                             agent.record_interaction(
                                 InteractionKind::Reasoning,
@@ -1007,7 +1072,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     }
                     Some("AgentMessage") => {
                         if let Some(text) = plain_text(&item["content"]) {
-                            let text = sanitise(&text);
+                            let text = sanitise_content(&text);
                             agent.result_status_claim = receipt_claim(&text);
                             agent.record_interaction(
                                 InteractionKind::Message,
@@ -1052,7 +1117,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     .or_else(|| payload.get("text"))
                     .and_then(Value::as_str)
                 {
-                    let message = sanitise(raw);
+                    let message = sanitise_content(raw);
                     agent.result_status_claim = receipt_claim(&message);
                     agent.record_interaction(
                         InteractionKind::Message,
@@ -1078,7 +1143,26 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 }
                 true
             }
-            Some("token_count") => true,
+            Some("token_count") => {
+                if let Some(usage) =
+                    parse_context_usage(payload, timestamp, agent.context_usage.as_ref())
+                {
+                    agent.context_usage = Some(usage);
+                }
+                true
+            }
+            Some("context_compacted") => {
+                agent.context_usage = None;
+                agent.push_interaction(
+                    InteractionKind::Context,
+                    "COMPACTED",
+                    timestamp,
+                    ordinal,
+                    None,
+                    None,
+                );
+                true
+            }
             Some(_) | None => false,
         },
         Some("response_item") => match payload["type"].as_str() {
@@ -1159,7 +1243,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
             Some("message") => {
                 if payload["role"].as_str() == Some("assistant") {
                     if let Some(text) = plain_text(&payload["content"]) {
-                        let text = sanitise(&text);
+                        let text = sanitise_content(&text);
                         agent.result_status_claim = receipt_claim(&text);
                         agent.record_interaction(
                             InteractionKind::Message,
@@ -1501,13 +1585,91 @@ mod tests {
         );
 
         let time = a.last_activity_at;
-        reduce(
+        assert!(reduce(
             &mut a,
-            &r(
-                r#"{"timestamp":"2024-01-02T00:00:00Z","type":"event_msg","payload":{"type":"token_count"}}"#,
-            ),
-        );
+            &serde_json::json!({
+                "timestamp":"2024-01-02T00:00:00Z",
+                "ordinal": 20,
+                "type":"event_msg",
+                "payload":{
+                    "type":"token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 38_000,
+                            "cached_input_tokens": 37_000,
+                            "output_tokens": 80,
+                            "reasoning_output_tokens": 20
+                        },
+                        "total_token_usage": {"total_tokens": 1_200_000},
+                        "model_context_window": 258_400
+                    }
+                }
+            }),
+        ));
         assert_eq!(a.last_activity_at, time);
+        let usage = a.context_usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens, 38_000);
+        assert_eq!(usage.cached_input_tokens, Some(37_000));
+        assert_eq!(usage.output_tokens, Some(80));
+        assert_eq!(usage.reasoning_output_tokens, Some(20));
+        assert_eq!(usage.cumulative_tokens, Some(1_200_000));
+        assert_eq!(usage.model_context_window, 258_400);
+        assert_eq!(usage.percent(), 14);
+        assert_eq!(usage.previous_input_tokens, None);
+
+        assert!(reduce(
+            &mut a,
+            &serde_json::json!({
+                "timestamp":"2024-01-02T00:00:01Z",
+                "ordinal": 21,
+                "type":"event_msg",
+                "payload":{
+                    "type":"token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 39_773},
+                        "model_context_window": 258_400
+                    }
+                }
+            }),
+        ));
+        assert_eq!(
+            a.context_usage.as_ref().unwrap().previous_input_tokens,
+            Some(38_000)
+        );
+        assert_eq!(a.context_usage.as_ref().unwrap().percent(), 15);
+
+        assert!(reduce(
+            &mut a,
+            &serde_json::json!({
+                "timestamp":"2024-01-02T00:00:02Z",
+                "ordinal": 22,
+                "type":"event_msg",
+                "payload":{
+                    "type":"token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 1},
+                        "model_context_window": 0
+                    }
+                }
+            }),
+        ));
+        assert_eq!(a.context_usage.as_ref().unwrap().input_tokens, 39_773);
+
+        assert!(reduce(
+            &mut a,
+            &serde_json::json!({
+                "timestamp":"2024-01-02T00:00:03Z",
+                "ordinal": 23,
+                "type":"event_msg",
+                "payload":{"type":"context_compacted"}
+            }),
+        ));
+        assert_eq!(a.last_activity_at, time);
+        assert!(a.context_usage.is_none());
+        let compacted = a.interactions.back().unwrap();
+        assert_eq!(compacted.kind, InteractionKind::Context);
+        assert_eq!(compacted.summary, "COMPACTED");
+        assert_eq!(compacted.ordinal, Some(23));
     }
 
     #[test]
@@ -1574,6 +1736,10 @@ mod tests {
         assert_eq!(sanitise("a\nb\r\nc\rd"), "a↩b↩c↩d");
         assert!(value.ends_with('…'));
         assert_eq!(sanitise("short"), "short");
+        let long_content = sanitise_content(&"x".repeat(CONTENT_TEXT_LIMIT + 1));
+        assert_eq!(long_content.len(), CONTENT_TEXT_LIMIT);
+        assert!(long_content.ends_with('…'));
+        assert!(long_content.len() > TEXT_LIMIT);
         let mut health = DataHealth::default();
         for offset in 0..25 {
             health.diagnostic(DiagnosticSample {
@@ -1726,13 +1892,14 @@ mod tests {
 
         let long_query = format!(
             r#"const result = await tools.mcp__tilth__tilth_search({{query:"{}"}});"#,
-            "x".repeat(TEXT_LIMIT * 2)
+            "x".repeat(CONTENT_TEXT_LIMIT * 2)
         );
         let bounded = summary_for_call(&serde_json::json!({
             "name": "exec",
             "input": long_query
         }));
-        assert!(bounded.len() <= TEXT_LIMIT);
+        assert!(bounded.len() <= CONTENT_TEXT_LIMIT);
+        assert!(bounded.len() > TEXT_LIMIT);
         assert!(bounded.ends_with('…'));
     }
     #[test]

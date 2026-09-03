@@ -39,6 +39,8 @@ Observed 0.152.1 rollouts already provide most of the data needed:
 - Records have monotonically increasing `ordinal` values in paginated rollouts.
 - `task_started` and `task_complete` carry turn timing information.
 - `task_complete.last_agent_message` can carry the terminal plaintext result directly and should be preferred over reconstructed prior message state when present.
+- `token_count.info` can carry `last_token_usage`, `total_token_usage`, and `model_context_window`. The latest request input count is usable as observed context occupancy; the cumulative total is accounting, not current context.
+- `context_compacted` is an explicit event, but does not say how many tokens were removed.
 - `response_item` tool-call records can appear before their matching outputs, joined by `call_id`. This is the dependable observed source of live activity in the reference run.
 - `item_completed` exposes useful typed items such as:
   - `Reasoning` with `summary_text`;
@@ -182,6 +184,7 @@ struct AgentState {
 
     latest_turn: TurnState,
     last_activity_at: Option<OffsetDateTime>,
+    context_usage: Option<ContextUsage>,
 
     next_call_sequence: u64,
     in_flight_calls: HashMap<String, InFlightCall>,
@@ -198,6 +201,17 @@ struct InFlightCall {
     started_at: Option<OffsetDateTime>,
     ordinal: Option<u64>,
     sequence: u64, // strict reducer-assigned arrival order within the active turn
+}
+
+struct ContextUsage {
+    observed_at: Option<OffsetDateTime>,
+    input_tokens: u64,
+    previous_input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
+    cumulative_tokens: Option<u64>,
+    model_context_window: u64,
 }
 
 struct TurnState {
@@ -244,7 +258,7 @@ Assign `InFlightCall.sequence` when a call record is reduced and increment `next
 
 A diagnostic sample must remain actionable even when malformed JSON provides neither a producer version nor an ordinal. Its rollout path and byte offset identify the input; `kind` and `detail` stay bounded and sanitised.
 
-The row status is the latest turn's lifecycle, not an irreversible status for the agent thread. A new `task_started` on an existing thread replaces `latest_turn` and clears prior in-flight calls, messages, reasoning, final text, and result claims. Separately retain a bounded chronological interaction history of sanitised lifecycle, message, reasoning, paired tool-invocation, and communication summaries across turns. A tool interaction retains a bounded, sanitised action summary, start time, observed-return or ended-without-return state, and elapsed duration. Derive the summary deterministically from its tool name and a small allowlist of useful string fields such as query, path, target, and command. When Codex persists orchestration as an outer `exec` call, scan but never execute a bounded prefix of its source for `tools.<name>(...)` invocations, group repeated tool names, and use a selected string argument only for a single nested invocation. Never retain the raw input or any tool output. Unknown shapes fall back to the outer tool name. Historical entries must remain confined to the explicit interaction view and must not be displayed as though they belonged to the active turn.
+The row status is the latest turn's lifecycle, not an irreversible status for the agent thread. A new `task_started` on an existing thread replaces `latest_turn` and clears prior in-flight calls, messages, reasoning, final text, and result claims. Separately retain a bounded chronological interaction history of sanitised lifecycle, context-management, message, reasoning, paired tool-invocation, and communication summaries across turns. A tool interaction retains a bounded, sanitised action summary, start time, observed-return or ended-without-return state, and elapsed duration. Derive the summary deterministically from its tool name and a small allowlist of useful string fields such as query, path, target, and command. When Codex persists orchestration as an outer `exec` call, scan but never execute a bounded prefix of its source for `tools.<name>(...)` invocations, group repeated tool names, and use a selected string argument only for a single nested invocation. Never retain the raw input or any tool output. Unknown shapes fall back to the outer tool name. Historical entries must remain confined to the explicit interaction view and must not be displayed as though they belonged to the active turn.
 
 Keep status semantics conservative. Wall-clock silence alone must not change lifecycle display. Once initial loading has caught up, derive a yellow `STALE` display state for a non-root agent whose own latest lifecycle remains `Running` when a later complete `list_agents` snapshot covering its path no longer includes it. Correlate the known call and output by `call_id`; distinguish an unfiltered snapshot from an explicitly scoped `path_prefix`; require its timestamp to postdate the agent's last activity; retain only a bounded set of snapshot timestamps, scopes, and sanitised agent paths; and discard raw arguments, statuses, and output. A malformed, structurally incomplete, oversized, unknown, or non-covering snapshot supplies no negative evidence. When no qualifying snapshot exists, meaningful activity elsewhere in the same session at least two hours later remains the conservative fallback. Either form means the observation stream is stale and completion is unknown; it must not alter the stored lifecycle, claim completion, or make the agent eligible for completed-agent filtering. Suppress stale inference only while initial history is structurally incomplete. The recent-change `catching up` indicator used after ordinary incremental polls must not suppress established stale evidence.
 
@@ -252,7 +266,7 @@ Use the agent's own rollout as the primary source for its latest-turn lifecycle.
 
 While the lifecycle remains `Running`, render `WAITING ON AGENT ↓` only when the reducer's newest unfinished call has the exact tool name `wait_agent`. A newer unfinished call takes precedence and completion removes it; message or reasoning text alone is never waiting evidence. Keep the independently displayed activity as `wait_agent`.
 
-`last_activity_at` should advance only for meaningful work/lifecycle activity that could reasonably answer “when did this agent last do something?” Do not refresh it for bookkeeping such as `token_count` alone.
+`last_activity_at` should advance only for meaningful work/lifecycle activity that could reasonably answer “when did this agent last do something?” Do not refresh it for bookkeeping such as `token_count` or `context_compacted` alone. Retain only the latest valid context observation, derived from `last_token_usage.input_tokens / model_context_window`, with the prior input count for an observation-to-observation delta. Label it as observed rather than live. Keep cumulative usage separate because it is not occupancy. Omit missing or malformed values rather than treating them as zero. When `context_compacted` appears, clear the superseded occupancy observation and append a timestamped bounded interaction; do not infer the number of tokens removed. Treat current context pressure as an active-agent operational signal and omit retained measurements from tree rows and selected-agent details for `Completed` and displayed `STALE` agents.
 
 ## Rollout discovery
 
@@ -433,6 +447,12 @@ If present, set `latest_turn.status = INTERRUPTED` unless the event contains a c
 
 Record a concise error and set `latest_turn.status = ERRORED` where appropriate. Treat it as meaningful activity when it concerns the active turn.
 
+#### `event_msg` → `token_count` / `context_compacted`
+
+For a valid `token_count`, retain the latest request input tokens, non-zero model context window, observation timestamp, previous input observation, and optional cached-input/output/reasoning-output counters. Retain `total_token_usage.total_tokens` only as explicitly labelled cumulative accounting. Current context percentage is input tokens divided by the model context window; cumulative totals must never be used as occupancy. These bookkeeping events do not advance meaningful activity.
+
+On `context_compacted`, clear the prior occupancy measurement until another valid `token_count` arrives and append a `context: COMPACTED` interaction. The event proves compaction occurred but supplies no removed-token count.
+
 #### `response_item` → tool calls and outputs
 
 Treat `custom_tool_call`, `function_call`, and other observed call records as the primary live-activity path. Record a concise `InFlightCall` keyed by `call_id`, assign the next reducer-local sequence, and retain the record ordinal/timestamp when available. On a matching output or other terminal record, remove that exact in-flight call and update recent activity/result text.
@@ -543,7 +563,7 @@ Use a restrained semantic named-colour palette for titles and borders, metadata,
 Each row should try to fit:
 
 ```text
-indent + display name | role | status/result hint | elapsed or last-activity age
+indent + display name | role | status/result hint | active-agent observed context pressure | elapsed or last-activity age
 ```
 
 Use `agent_path` segments for labels. If it is absent, fall back to nickname and then abbreviated thread id.
@@ -565,6 +585,8 @@ compatibility level
 latest-turn lifecycle status
 started/completed timestamps or duration
 last meaningful activity timestamp
+latest observed context input/window, percentage, prior-observation change, and timestamp for an active agent; omit for `Completed` and displayed `STALE` agents
+optional cached-input/output/reasoning-output counts and separately labelled cumulative usage
 in-flight/recent tool activity
 last reasoning summary
 last plaintext message
@@ -573,7 +595,7 @@ session data-health counters
 recent bounded data-health diagnostics
 ```
 
-Long text must be bounded, sanitised, and clipped. Scrolling the detail pane is useful if easy, but not required before the tree/live updates work.
+Long text must remain bounded and sanitised. Compact tree and interaction rows use a deliberately short rendering bound; the main details and selected-interaction panes use the larger retained-content bound and receive rows unused by a short list, up to the list's existing screen-share cap. The terminal viewport may still clip content that genuinely exceeds the available pane. Scrolling the detail pane is useful if easy, but not required before the tree/live updates work.
 
 ### Keys
 
@@ -782,7 +804,9 @@ A handful of unit tests and tiny fixtures should cover:
 26. a root-only selected-reader constructor followed by progressive deterministic parent-first admission, same-poll completion of many tiny rollout snapshots, separately bounded bulk initial catch-up, preserved steady-state byte/work limits including charged admission and completion, live-tail and pending-child fairness during saturated initial catch-up, exact correlated `spawn_agent` result hints prioritising the matching session-date directory ahead of bounded recursive recovery so unrelated traversal volume cannot delay a signalled child, linear JSONL buffer consumption, eventual full-load state/cursor/health equivalence, a truthful loading indicator, stable selection as agents appear and reorder, and deterministic loading/steady deadline timing helpers;
 27. exact-version content-addressed schema lookup, embedded/user catalogue conflict rejection, self-contained schema and hash validation, release-export extraction, tag/provenance validation, family deduplication, idempotent synchronisation, and failure-atomic publication; and
 28. conservative stale display requiring a non-root `Running` lifecycle and either a later complete covering `list_agents` snapshot that excludes the agent or, as fallback, at least two hours of later meaningful activity elsewhere in the fully loaded session, including call/output correlation, full/scoped coverage, timestamp ordering, bounded sanitised retention without raw tool data, malformed/incomplete/oversized rejection, exact fallback-threshold behaviour, initial-loading suppression without live-update flicker, warning styling and evidence-specific detail, root/terminal exclusions, and continued visibility under completed-agent filtering; and
-29. bounded deterministic tool-action summaries for direct calls and nested calls inside `exec` orchestration source, including grouped repeated tool names, allowlisted single-call query/path/target/command detail, control stripping and truncation, fallback for unknown shapes, unchanged call/output state and duration pairing, and no raw input or output retention.
+29. bounded deterministic tool-action summaries for direct calls and nested calls inside `exec` orchestration source, including grouped repeated tool names, allowlisted single-call query/path/target/command detail, control stripping and truncation, fallback for unknown shapes, unchanged call/output state and duration pairing, and no raw input or output retention; and
+30. context usage derived only from a valid latest-request input count and non-zero model context window, including safe percentage calculation, prior-observation delta, separately labelled optional per-request and cumulative counters, missing/malformed omission, no meaningful-activity refresh, neutral/warning/error pressure styling at the documented thresholds, bounded handoff guidance, tree/detail suppression for `Completed` and displayed `STALE` agents without discarding retained evidence, and a timestamped compaction interaction that clears superseded occupancy without inventing a removed-token count; and
+31. main and interaction layouts sizing short lists to their natural bordered height up to their prior percentage caps, giving unused rows to detail panes, preserving deliberately compact rows, and rendering larger bounded retained message/reasoning/tool content in both the selected-agent and selected-interaction details.
 Do not vendor entire real rollout files. Minimise representative lines into small, sanitised fixtures or inline JSON test data. Keep provenance outside fixture payloads: record which exact producer version and schema informed each fixture.
 
 ## POC acceptance check
