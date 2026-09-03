@@ -15,6 +15,9 @@ struct Args {
     sessions_dir: Option<PathBuf>,
     #[arg(long)]
     session: Option<String>,
+    /// Colour output mode
+    #[arg(long, value_enum, default_value_t = ui::ColorMode::Auto)]
+    color: ui::ColorMode,
 }
 
 fn sessions_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -37,7 +40,7 @@ fn require_terminal() -> Result<()> {
 
 fn open_selected_reader(
     discovery: rollout::Discovery,
-    requested: Option<&str>,
+    requested: &str,
     dir: PathBuf,
     cwd: PathBuf,
 ) -> Result<rollout::SelectedReader> {
@@ -47,20 +50,24 @@ fn open_selected_reader(
         health: _archive_health,
     } = discovery;
     let groups = rollout::group(admitted);
-    let selected = rollout::select(&groups, requested, &cwd)?.clone();
+    let selected = rollout::select(&groups, Some(requested))?.clone();
     rollout::SelectedReader::new(selected, pending, dir, cwd)
 }
 
 fn run() -> Result<()> {
     let args = Args::parse();
     let dir = sessions_dir(args.sessions_dir)?;
-    let discovery = rollout::discover(&dir)
-        .with_context(|| format!("discover sessions under {}", dir.display()))?;
     let cwd = std::env::current_dir().context("resolve current working directory")?;
-    let mut reader = open_selected_reader(discovery, args.session.as_deref(), dir, cwd)?;
 
     require_terminal()?;
-    ui::run(&mut reader)
+    if let Some(requested) = args.session.as_deref() {
+        let discovery = rollout::discover(&dir)
+            .with_context(|| format!("discover sessions under {}", dir.display()))?;
+        let mut reader = open_selected_reader(discovery, requested, dir, cwd)?;
+        ui::run(&mut reader, args.color)
+    } else {
+        ui::run_browser(dir, cwd, args.color)
+    }
 }
 
 fn main() {
@@ -74,8 +81,33 @@ fn main() {
 mod tests {
     use super::*;
     use crate::model::DiagnosticSample;
+    use clap::CommandFactory;
     use std::fs;
 
+    #[test]
+    fn color_cli_accepts_exact_values_and_defaults_to_auto() {
+        let default = Args::try_parse_from(["agentop"]).unwrap();
+        assert_eq!(default.color, ui::ColorMode::Auto);
+        assert_eq!(
+            Args::try_parse_from(["agentop", "--color=auto"])
+                .unwrap()
+                .color,
+            ui::ColorMode::Auto
+        );
+        assert_eq!(
+            Args::try_parse_from(["agentop", "--color=none"])
+                .unwrap()
+                .color,
+            ui::ColorMode::None
+        );
+        assert!(Args::try_parse_from(["agentop", "--color=always"]).is_err());
+
+        let mut help = Vec::new();
+        Args::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert!(help.contains("--color <COLOR>"));
+        assert!(help.contains("[possible values: none, auto]"));
+    }
     #[test]
     fn selected_reader_excludes_unrelated_archive_health() {
         let temp = tempfile::tempdir().expect("temporary sessions directory");
@@ -99,7 +131,7 @@ mod tests {
 
         let reader = open_selected_reader(
             discovery,
-            None,
+            "session",
             temp.path().to_path_buf(),
             PathBuf::from("/repo"),
         )

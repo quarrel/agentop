@@ -264,6 +264,8 @@ Keep status semantics conservative. If the rollout only tells us an agent is run
 
 Use the agent's own rollout as the primary source for its latest-turn lifecycle. Parent-side `SubAgentActivity` is supplementary evidence and a useful fallback while a child rollout is still pending discovery; it must not overwrite a contradictory child lifecycle. If a plaintext final result contains `status=BLOCKED`, surface it as an explicitly labelled result claim while retaining the lifecycle state separately.
 
+While the lifecycle remains `Running`, render `WAITING ON AGENT ↓` only when the reducer's newest unfinished call has the exact tool name `wait_agent`. A newer unfinished call takes precedence and completion removes it; message or reasoning text alone is never waiting evidence. Keep the independently displayed activity as `wait_agent`.
+
 `last_activity_at` should advance only for meaningful work/lifecycle activity that could reasonably answer “when did this agent last do something?” Do not refresh it for bookkeeping such as `token_count` alone.
 
 ## Rollout discovery
@@ -322,17 +324,15 @@ Build the hierarchy by joining each child's `parent_thread_id` to another rollou
 
 Use `agent_path` as the preferred display label and as a useful consistency check, not as the only source of topology.
 
-### 4. Pick the initial session simply
+### 4. Browse and select a session
 
-Selection precedence is:
+Selection behaviour is:
 
-1. honour an explicit `--session <SESSION_ID>` exact match or unique prefix first;
-2. otherwise prefer the cohort whose root `cwd` exactly matches the current working directory; and
-3. fall back to all session groups when that cohort is empty.
+1. honour an explicit `--session <SESSION_ID>` exact match or unique prefix and bypass the browser;
+2. otherwise show all discovered session groups in a global picker, ordered by the group's greatest rollout-file modification time, with the greatest `session_meta` timestamp as a deterministic fallback when modification times are unavailable; and
+3. keep the selected session identifier stable across rediscovery when it remains present.
 
-Within either automatic cohort, choose the whole session group whose greatest rollout metadata timestamp is newest. Use a deterministic session identifier tie-break.
-
-This is enough for the POC. Do not build a session picker before the live tree works; add a basic picker later only if it is trivial.
+Picker discovery is metadata-only. Display a bounded, sanitised project label from the root rollout's optional `git.repository_url` repository name, falling back to the final root `cwd` component. Details may show the bounded full cwd and repository URL. Enter opens the live tree; Esc returns to the picker, while Esc in the picker and q exit. `r` triggers rediscovery. Do not infer lifecycle health during aggregate discovery, use cwd/path equivalence heuristics, or conflate aggregate archive health with the opened session reader's health.
 
 ## Incremental file reading
 
@@ -350,10 +350,10 @@ struct RolloutCursor {
 Rules:
 
 1. Open files read-only.
-2. On initial load of the selected session, stream and parse the existing content once.
+2. Construct the selected reader with only minimal root/session state, snapshot each discovered rollout's current length, and reduce that existing history progressively. Use a larger but bounded initial catch-up allowance while reserving the smaller steady-state byte/work allowance for live tails, discovery, and pending children.
 3. Define `byte_offset` as the next unread file position. Bytes held in `partial_line` have already been read and are before that offset.
 4. On later ticks, compare file length with the stored offset.
-5. If bytes were appended, seek to the offset, append new bytes to `partial_line`, advance the offset by exactly the bytes read, and extract newline-terminated records.
+5. If bytes were appended, seek to the offset, append new bytes to `partial_line`, advance the offset by exactly the bytes read, and extract newline-terminated records with a single buffer compaction per chunk rather than shifting the remainder after every record.
 6. Never parse an incomplete final record; retain it until more bytes arrive.
 7. Treat `ordinal` as per-rollout ordering/deduplication evidence when present. Do not impose a total cross-file order from ordinals.
 8. Stream records rather than loading a whole rollout into one string.
@@ -550,7 +550,7 @@ result: status=CANDIDATE · blocker=none
 ↑↓ select   Enter details   r rescan   q quit
 ```
 
-Exact styling is unimportant. Prefer clarity over decoration.
+Use a restrained semantic named-colour palette for titles and borders, metadata, roles, lifecycle, schema/compatibility/data health, and warning/error/catching-up states. The public `--color=auto|none` option defaults to `auto`; because rendering requires an interactive TTY, `auto` enables colour. `none` must leave every explicit foreground and background colour reset while preserving labels, a visible selection marker, and non-colour selection attributes. Prefer clarity over decoration.
 
 ### Tree rows
 
@@ -611,7 +611,7 @@ enter raw mode + alternate screen through a terminal guard
 initial discovery + selected session load
 
 loop:
-    poll keyboard event with ~250 ms timeout
+    poll keyboard events, capped by the next reader deadline
     handle key if present
     process a bounded record/byte budget from known rollouts
     periodically rescan for newly created rollout files
@@ -628,10 +628,13 @@ Keep filesystem and per-tick work bounded:
 - discovery streams only through `session_meta` from unrelated rollouts;
 - only the selected session's files are parsed in full/tail mode;
 - subsequent updates read appended bytes only;
-- each tick has a record or byte budget so an append burst cannot starve keyboard handling; and
+- initial catch-up has a separate 8 MiB/65,536-record per-poll allowance while preserving a 256 KiB/2,048-work reserve for live tails, discovery, and pending children;
+- steady ticks retain their smaller record and byte budget so an append burst cannot starve keyboard handling; and
 - stored text, diagnostics, and activity history remain capped independently of rollout size.
 
 This should remain responsive even with old large orchestrator rollouts without needing an indexing service.
+
+Opening a selected group constructs root/minimal state without parsing its complete history. Existing rollouts are reduced in bounded batches with a separate 8 MiB/65,536-record initial allowance; each poll preserves the ordinary 256 KiB/2,048-work reserve for live reading, discovery, and pending children. Successive completed snapshots may therefore be admitted within one poll. Order work deterministically with parents before children when metadata permits and use a bounded deterministic fallback for malformed or orphan metadata. Display `loading history…` exactly while this queue remains, target a roughly 50 ms loading cadence with event waits capped by the next reader deadline, and settle ordinary live polling to about one second without busy-spinning. Selection remains keyed by thread ID as rows appear or reorder. An exceptional truncation rebuild may remain synchronous in this POC.
 
 ## Implementation sequence
 
@@ -667,8 +670,8 @@ Implement:
 - exact-schema catalogue lookup;
 - grouping by `session_id`;
 - root detection;
-- explicit `--session` override before automatic selection;
-- exact-current-cwd cohort then global fallback, choosing the group with the greatest rollout metadata timestamp; and
+- explicit `--session` exact/unique-prefix override before the picker;
+- a global newest-observed-update-first session picker using group rollout-file modification times with metadata timestamp fallback; and
 - visible data-health counts for rejected metadata.
 
 Temporarily print a tree such as:
@@ -683,7 +686,7 @@ Validate this against the existing hello-world session before moving on.
 
 ### Step 3 — parse selected session into `SessionState`
 
-Stream all currently existing records for the selected session's rollouts and reduce the supported records into `AgentState`.
+Construct the selected reader without consuming all existing history before display. Render the minimal root state first, then reduce the construction-time rollout snapshots over successive bounded polls with a larger initial catch-up allowance while ordinary discovery and live tailing retain a reserved steady-state allowance. Agents should appear deterministically, root first and parent before child when the metadata graph permits, as each rollout begins reduction. Clear the loading indication only when the snapshot is fully reduced; the eventual state, cursor offsets, and data-health accounting must match full-load reducer semantics.
 
 At the end, a debug print should show sensible latest-turn states, in-flight/recent activity, producer/schema coverage, and labelled final result claims for the hello-world root/owner/candidate chain.
 
@@ -761,7 +764,7 @@ Then point Agentop at the existing long multi-day session and confirm that loadi
 
 ## Small tests worth having
 
-Keep tests focused on capture validation, parsing, reduction, and reader invariants rather than terminal styling.
+Keep tests focused on capture validation, parsing, reduction, reader invariants, and targeted terminal styling where correctness or accessibility requires it.
 
 A handful of unit tests and tiny fixtures should cover:
 
@@ -785,9 +788,12 @@ A handful of unit tests and tiny fixtures should cover:
 18. rollout text containing ANSI/control bytes being safely sanitised and bounded;
 19. bookkeeping-only events such as `token_count` not updating `last_activity_at`;
 20. operation against read-only fixture files;
-21. explicit-session precedence, exact-current-cwd cohort selection, global fallback, and newest whole-group metadata timestamp selection;
-22. root-first hierarchical tree ordering by newest subtree activity, including direct siblings and deterministic ties while preserving selection by thread ID; and
-23. selected-session health excluding archive-wide discovery diagnostics from unrelated rollouts.
+21. explicit-session picker bypass, global newest-observed-update ordering by greatest group rollout-file modification time with metadata timestamp fallback, long-running old-root/recent-child ranking, and picker selection stability across rediscovery;
+22. root-first hierarchical tree ordering by newest subtree activity, including direct siblings and deterministic ties while preserving selection by thread ID;
+23. selected-session health excluding archive-wide discovery diagnostics from unrelated rollouts;
+24. exact colour-mode CLI values/help, representative semantic colour use, and colour-free picker/tree/tiny rendering that retains non-colour selection cues;
+25. exact newest-running in-flight `wait_agent` precedence in tree and detail status, including clearing on completion, a newer non-wait call taking precedence, preserved activity text, and message text alone not being lifecycle evidence; and
+26. a root-only selected-reader constructor followed by progressive deterministic parent-first admission, same-poll completion of many tiny rollout snapshots, separately bounded bulk initial catch-up, preserved steady-state byte/work limits including charged admission and completion, live-tail and pending-child fairness during saturated initial catch-up, linear JSONL buffer consumption, eventual full-load state/cursor/health equivalence, a truthful loading indicator, stable selection as agents appear and reorder, and deterministic loading/steady deadline timing helpers.
 
 Do not vendor entire real rollout files. Minimise representative lines into small, sanitised fixtures or inline JSON test data. Keep provenance outside fixture payloads: record which exact producer version and schema informed each fixture.
 
@@ -800,7 +806,7 @@ The POC is good enough when, from the Agentop dev container, the user can run it
 - reports unknown/malformed/oversized input with bounded useful diagnostics rather than silently presenting incomplete state;
 - claims semantic support only for versions covered by representative fixtures;
 - does not let inherited pre-boundary records—including `session_meta`—create, overwrite, or otherwise affect projected agent state when Codex provides `subagent_history_start_ordinal`; and
-- remains responsive while selected rollouts grow.
+- renders the first selected-session screen before complete history reduction, adds agents progressively in deterministic parent-first order while loading, and remains responsive while selected rollouts grow.
 
 For the known 0.152.1 hello-world run, it should reconstruct at least:
 

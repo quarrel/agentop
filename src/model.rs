@@ -40,6 +40,7 @@ impl Default for TurnState {
 }
 #[derive(Debug, Clone)]
 pub struct InFlightCall {
+    pub tool_name: String,
     pub summary: String,
     pub started_at: Option<DateTime<Utc>>,
     pub ordinal: Option<u64>,
@@ -123,18 +124,27 @@ impl AgentState {
         }
     }
     pub fn current_activity(&self) -> Option<&str> {
-        self.in_flight_calls
-            .values()
-            .max_by_key(|c| c.sequence)
-            .map(|c| c.summary.as_str())
+        self.newest_in_flight_call()
+            .map(|call| call.summary.as_str())
             .or(self.last_reasoning_summary.as_deref())
             .or(self.last_message.as_deref())
     }
 
-    pub fn active_call_evidence(&self) -> Option<(Option<DateTime<Utc>>, Option<u64>)> {
+    pub fn is_waiting_on_agent(&self) -> bool {
+        self.latest_turn.status == TurnStatus::Running
+            && self
+                .newest_in_flight_call()
+                .is_some_and(|call| call.tool_name == "wait_agent")
+    }
+
+    fn newest_in_flight_call(&self) -> Option<&InFlightCall> {
         self.in_flight_calls
             .values()
             .max_by_key(|call| call.sequence)
+    }
+
+    pub fn active_call_evidence(&self) -> Option<(Option<DateTime<Utc>>, Option<u64>)> {
+        self.newest_in_flight_call()
             .map(|call| (call.started_at, call.ordinal))
     }
 }
@@ -388,10 +398,16 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     .to_owned();
                 let sequence = agent.next_call_sequence;
                 agent.next_call_sequence += 1;
+                let tool_name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_owned();
                 agent.in_flight_calls.insert(
                     call_id,
                     InFlightCall {
                         summary: summary_for_call(payload),
+                        tool_name,
                         started_at: timestamp,
                         ordinal,
                         sequence,
@@ -592,6 +608,51 @@ mod tests {
         assert_eq!(state.in_flight_calls["c"].summary, "running exec");
         assert!(!state.in_flight_calls["c"].summary.contains("secret"));
     }
+    #[test]
+    fn exact_wait_agent_tracks_only_newest_running_call() {
+        let mut state = agent();
+        reduce(
+            &mut state,
+            &r(r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t"}}"#),
+        );
+        reduce(
+            &mut state,
+            &r(r#"{"type":"event_msg","payload":{"type":"agent_message","message":"wait_agent"}}"#),
+        );
+        assert!(!state.is_waiting_on_agent());
+
+        reduce(
+            &mut state,
+            &r(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"w","name":"wait_agent"}}"#,
+            ),
+        );
+        assert!(state.is_waiting_on_agent());
+        assert_eq!(state.current_activity(), Some("wait_agent"));
+
+        reduce(
+            &mut state,
+            &r(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"n","name":"exec"}}"#,
+            ),
+        );
+        assert!(!state.is_waiting_on_agent());
+        reduce(
+            &mut state,
+            &r(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"n"}}"#,
+            ),
+        );
+        assert!(state.is_waiting_on_agent());
+        reduce(
+            &mut state,
+            &r(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"w"}}"#,
+            ),
+        );
+        assert!(!state.is_waiting_on_agent());
+    }
+
     #[test]
     fn alpha_4_1_representative_sequence() {
         let mut state = AgentState::new("child".into(), "0.149.0-alpha.4.1".into());

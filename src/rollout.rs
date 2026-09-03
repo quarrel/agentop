@@ -6,14 +6,19 @@ use crate::schema::{lookup, SchemaStatus};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use walkdir::WalkDir;
 
 pub const MAX_RECORD_SIZE: usize = 1024 * 1024;
 pub const APPEND_BUDGET: usize = 256 * 1024;
+const INITIAL_LOAD_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+const POLL_WORK_BUDGET: usize = 2048;
+const INITIAL_LOAD_WORK_BUDGET: usize = 65_536;
+const READ_SLICE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RolloutMetadata {
@@ -22,7 +27,9 @@ pub struct RolloutMetadata {
     pub thread_id: String,
     pub parent_thread_id: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub repository_url: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
+    pub modified_at: Option<DateTime<Utc>>,
     pub cli_version: String,
     pub agent_path: Option<String>,
     pub agent_role: Option<String>,
@@ -80,6 +87,10 @@ fn metadata(value: &Value, path: PathBuf, consumed_offset: u64) -> Result<Rollou
         .context("required cli_version is missing")?
         .to_owned();
     let spawn = p.pointer("/source/subagent/thread_spawn");
+    let modified_at = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| (time != SystemTime::UNIX_EPOCH).then(|| DateTime::<Utc>::from(time)));
     Ok(RolloutMetadata {
         path,
         session_id,
@@ -90,7 +101,12 @@ fn metadata(value: &Value, path: PathBuf, consumed_offset: u64) -> Result<Rollou
             .or_else(|| spawn.and_then(|s| s["parent_thread_id"].as_str()))
             .map(str::to_owned),
         cwd: p.get("cwd").and_then(Value::as_str).map(PathBuf::from),
+        repository_url: p
+            .pointer("/git/repository_url")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         timestamp: crate::model::parse_time(p.get("timestamp")),
+        modified_at,
         cli_version,
         agent_path: p
             .get("agent_path")
@@ -207,17 +223,24 @@ pub fn discover(sessions_dir: &Path) -> Result<Discovery> {
     }
     Ok(out)
 }
-fn latest_group_timestamp(group: &SessionGroup) -> Option<DateTime<Utc>> {
+pub fn session_updated_at(group: &SessionGroup) -> Option<DateTime<Utc>> {
     group
         .rollouts
         .iter()
-        .filter_map(|meta| meta.timestamp)
+        .filter_map(|meta| meta.modified_at)
         .max()
+        .or_else(|| {
+            group
+                .rollouts
+                .iter()
+                .filter_map(|meta| meta.timestamp)
+                .max()
+        })
 }
 
 fn compare_group_recency(a: &SessionGroup, b: &SessionGroup) -> std::cmp::Ordering {
-    latest_group_timestamp(a)
-        .cmp(&latest_group_timestamp(b))
+    session_updated_at(a)
+        .cmp(&session_updated_at(b))
         .then_with(|| b.session_id.cmp(&a.session_id))
 }
 
@@ -244,11 +267,7 @@ pub fn group(items: Vec<RolloutMetadata>) -> Vec<SessionGroup> {
     groups.sort_by(|a, b| compare_group_recency(b, a));
     groups
 }
-pub fn select<'a>(
-    groups: &'a [SessionGroup],
-    requested: Option<&str>,
-    cwd: &Path,
-) -> Result<&'a SessionGroup> {
+pub fn select<'a>(groups: &'a [SessionGroup], requested: Option<&str>) -> Result<&'a SessionGroup> {
     if let Some(id) = requested {
         if let Some(exact) = groups.iter().find(|group| group.session_id == id) {
             return Ok(exact);
@@ -266,12 +285,7 @@ pub fn select<'a>(
             ),
         };
     }
-    groups
-        .iter()
-        .filter(|group| group.rollouts[group.root].cwd.as_deref() == Some(cwd))
-        .max_by(|a, b| compare_group_recency(a, b))
-        .or_else(|| groups.iter().max_by(|a, b| compare_group_recency(a, b)))
-        .context("no sessions found")
+    groups.first().context("no sessions found")
 }
 impl RolloutCursor {
     pub fn new(meta: &RolloutMetadata) -> Self {
@@ -326,26 +340,35 @@ impl RolloutCursor {
         take.read_to_end(&mut chunk)?;
         self.byte_offset += chunk.len() as u64;
         self.partial_line.extend_from_slice(&chunk);
+
+        let buffer_start = self.byte_offset - self.partial_line.len() as u64;
+        let mut consumed = 0;
         let mut count = 0;
         while count < max_records {
-            let Some(pos) = self.partial_line.iter().position(|b| *b == b'\n') else {
+            let Some(relative_pos) = self.partial_line[consumed..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            else {
                 break;
             };
-            let line = self.partial_line.drain(..=pos).collect::<Vec<_>>();
-            let offset = self.byte_offset - self.partial_line.len() as u64 - line.len() as u64;
+            let end = consumed + relative_pos + 1;
+            let offset = buffer_start + consumed as u64;
             if self.discarding_oversized {
                 self.discarding_oversized = false;
                 let start = self.oversized_start.take().unwrap_or(offset);
                 on_record(start, Err(RecordError::Oversized));
                 count += 1;
+                consumed = end;
                 continue;
             }
+            let line = &self.partial_line[consumed..end];
             if line.len() > MAX_RECORD_SIZE {
                 on_record(offset, Err(RecordError::Oversized));
                 count += 1;
+                consumed = end;
                 continue;
             }
-            let parsed = serde_json::from_slice::<Value>(&line).map_err(RecordError::Malformed);
+            let parsed = serde_json::from_slice::<Value>(line).map_err(RecordError::Malformed);
             if let Ok(value) = &parsed {
                 self.last_ordinal = value
                     .get("ordinal")
@@ -354,6 +377,10 @@ impl RolloutCursor {
             }
             on_record(offset, parsed);
             count += 1;
+            consumed = end;
+        }
+        if consumed > 0 {
+            self.partial_line.drain(..consumed);
         }
         if self.partial_line.len() > MAX_RECORD_SIZE {
             self.oversized_start = Some(self.byte_offset - self.partial_line.len() as u64);
@@ -608,10 +635,19 @@ pub enum PollOutcome {
     Updated { records: usize, admitted: usize },
     Rebuilt,
 }
+
+#[derive(Debug)]
+struct InitialLoad {
+    meta: RolloutMetadata,
+    cursor: RolloutCursor,
+    target_offset: u64,
+}
+
 pub struct SelectedReader {
     pub group: SessionGroup,
     pub state: SessionState,
     cursors: Vec<RolloutCursor>,
+    initial_load: VecDeque<InitialLoad>,
     pending: Vec<PathBuf>,
     pending_cursors: HashMap<PathBuf, RolloutCursor>,
     known_paths: HashSet<PathBuf>,
@@ -628,7 +664,65 @@ impl SelectedReader {
         sessions_root: PathBuf,
         repo_root: PathBuf,
     ) -> Result<Self> {
-        let (state, cursors) = load_group(&group, &repo_root)?;
+        let root = group.rollouts[group.root].clone();
+        let mut state = SessionState {
+            session_id: group.session_id.clone(),
+            cwd: root.cwd.clone(),
+            started_at: root.timestamp,
+            ..Default::default()
+        };
+        state
+            .agents
+            .insert(root.thread_id.clone(), agent_from_meta(&root, &repo_root)?);
+
+        // Discovery has already bounded and parsed metadata. Sort it once, then make
+        // stable parent-aware passes without reopening rollout content here.
+        let mut remaining = group.rollouts.to_vec();
+        remaining.sort_by(|a, b| {
+            a.depth
+                .unwrap_or(u64::MAX)
+                .cmp(&b.depth.unwrap_or(u64::MAX))
+                .then_with(|| a.agent_path.cmp(&b.agent_path))
+                .then_with(|| a.thread_id.cmp(&b.thread_id))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        let root_index = remaining
+            .iter()
+            .position(|meta| meta.path == root.path)
+            .context("selected root metadata missing")?;
+        let mut ordered = Vec::with_capacity(remaining.len());
+        ordered.push(remaining.remove(root_index));
+        let mut placed = HashSet::from([root.thread_id.clone()]);
+        while !remaining.is_empty() {
+            let before = remaining.len();
+            remaining.retain(|meta| {
+                let ready = meta
+                    .parent_thread_id
+                    .as_ref()
+                    .is_some_and(|parent| placed.contains(parent));
+                if ready {
+                    placed.insert(meta.thread_id.clone());
+                    ordered.push(meta.clone());
+                }
+                !ready
+            });
+            if remaining.len() == before {
+                // Deterministic fallback for orphaned or cyclic metadata.
+                ordered.append(&mut remaining);
+            }
+        }
+        let initial_load = ordered
+            .into_iter()
+            .map(|meta| {
+                let target_offset = std::fs::metadata(&meta.path)?.len();
+                let cursor = RolloutCursor::new(&meta);
+                Ok(InitialLoad {
+                    meta,
+                    cursor,
+                    target_offset,
+                })
+            })
+            .collect::<Result<VecDeque<_>>>()?;
         let pending_cursors = pending
             .iter()
             .cloned()
@@ -644,7 +738,8 @@ impl SelectedReader {
         Ok(Self {
             group,
             state,
-            cursors,
+            cursors: Vec::new(),
+            initial_load,
             pending,
             pending_cursors,
             known_paths,
@@ -655,14 +750,139 @@ impl SelectedReader {
             pending_next: 0,
         })
     }
+
+    pub fn is_loading(&self) -> bool {
+        !self.initial_load.is_empty()
+    }
     pub fn poll(&mut self) -> Result<PollOutcome> {
         const DIRECTORY_ENTRY_BUDGET: usize = 1024;
-        const POLL_WORK_BUDGET: usize = 2048;
-        const SLICE: usize = 32 * 1024;
-        let mut remaining_bytes = APPEND_BUDGET;
-        let mut remaining_work = POLL_WORK_BUDGET;
+        let loading_at_start = !self.initial_load.is_empty();
+        let (mut remaining_bytes, mut remaining_work) = if loading_at_start {
+            (
+                INITIAL_LOAD_BYTE_BUDGET + APPEND_BUDGET,
+                INITIAL_LOAD_WORK_BUDGET + POLL_WORK_BUDGET,
+            )
+        } else {
+            (APPEND_BUDGET, POLL_WORK_BUDGET)
+        };
+        let mut records = 0;
+        let initial_byte_floor = APPEND_BUDGET;
+        let initial_work_floor = POLL_WORK_BUDGET;
 
-        for _ in 0..DIRECTORY_ENTRY_BUDGET {
+        while remaining_bytes > initial_byte_floor
+            && remaining_work > initial_work_floor
+            && !self.initial_load.is_empty()
+        {
+            let load = self.initial_load.front_mut().expect("initial load exists");
+            if !self.state.agents.contains_key(&load.meta.thread_id) {
+                let agent = agent_from_meta(&load.meta, &self.repo_root)?;
+                self.state.agents.insert(load.meta.thread_id.clone(), agent);
+                remaining_work -= 1;
+                if remaining_work == initial_work_floor {
+                    continue;
+                }
+            }
+            if load.cursor.byte_offset >= load.target_offset {
+                let finished = self.initial_load.pop_front().expect("initial load exists");
+                self.cursors.push(finished.cursor);
+                remaining_work -= 1;
+                continue;
+            }
+
+            let agent = self
+                .state
+                .agents
+                .get_mut(&load.meta.thread_id)
+                .context("initial-load agent missing")?;
+            let health = &mut self.state.data_health;
+            let path = load.cursor.path.clone();
+            let version = agent.cli_version.clone();
+            let boundary = load.cursor.history_start;
+            let mut crossed = load.cursor.crossed_history_start;
+            let before = load.cursor.byte_offset;
+            let budget = READ_SLICE
+                .min(remaining_bytes - initial_byte_floor)
+                .min((load.target_offset - before) as usize);
+            let work_budget = remaining_work - initial_work_floor;
+            let outcome = load
+                .cursor
+                .tail_bounded(budget, work_budget, |offset, record| {
+                    records += 1;
+                    match record {
+                        Ok(value) => {
+                            let ordinal = value.get("ordinal").and_then(Value::as_u64);
+                            if !crossed {
+                                if ordinal.is_some_and(|value| {
+                                    value >= boundary.expect("boundary exists")
+                                }) {
+                                    crossed = true;
+                                } else {
+                                    if ordinal.is_none() {
+                                        health.diagnostic(DiagnosticSample {
+                                            rollout_path: path.clone(),
+                                            byte_offset: offset,
+                                            cli_version: Some(version.clone()),
+                                            ordinal: None,
+                                            kind: "pre_boundary_without_ordinal".into(),
+                                            detail: None,
+                                        });
+                                    }
+                                    return;
+                                }
+                            }
+                            ingest_value(agent, health, &path, offset, &version, &value);
+                        }
+                        Err(error) => {
+                            let (kind, detail) = match error {
+                                RecordError::Oversized => {
+                                    health.oversized_records += 1;
+                                    ("oversized_record", None)
+                                }
+                                RecordError::Malformed(error) => {
+                                    health.malformed_records += 1;
+                                    (
+                                        "malformed_record",
+                                        Some(crate::model::sanitise(&error.to_string())),
+                                    )
+                                }
+                            };
+                            health.diagnostic(DiagnosticSample {
+                                rollout_path: path.clone(),
+                                byte_offset: offset,
+                                cli_version: Some(version.clone()),
+                                kind: kind.into(),
+                                ordinal: None,
+                                detail,
+                            });
+                        }
+                    }
+                })?;
+            load.cursor.crossed_history_start = crossed;
+            let spent = (load.cursor.byte_offset - before) as usize;
+            remaining_bytes -= spent.max(1).min(remaining_bytes);
+            let processed = match outcome {
+                TailOutcome::Records(count) => count,
+                TailOutcome::RebuildRequired => {
+                    let (state, cursors) = load_group(&self.group, &self.repo_root)?;
+                    self.state = state;
+                    self.cursors = cursors;
+                    self.initial_load.clear();
+                    self.cursor_next = 0;
+                    return Ok(PollOutcome::Rebuilt);
+                }
+            };
+            remaining_work -= processed.max(1).min(remaining_work);
+        }
+        // The bulk catch-up allowance belongs only to initial history. Preserve
+        // the ordinary budget boundary for discovery, live tails, and pending files.
+        remaining_bytes = remaining_bytes.min(APPEND_BUDGET);
+        remaining_work = remaining_work.min(POLL_WORK_BUDGET);
+        let directory_entry_budget = if loading_at_start {
+            DIRECTORY_ENTRY_BUDGET / 4
+        } else {
+            DIRECTORY_ENTRY_BUDGET
+        };
+        for _ in 0..directory_entry_budget {
             if remaining_bytes == 0 || remaining_work == 0 {
                 break;
             }
@@ -691,7 +911,6 @@ impl SelectedReader {
             }
         }
 
-        let mut records = 0;
         let cursor_count = self.cursors.len();
         let cursor_allowance = remaining_bytes / 2;
         let cursor_work_allowance = remaining_work / 2;
@@ -707,7 +926,7 @@ impl SelectedReader {
             }
             let index = self.cursor_next % self.cursors.len();
             self.cursor_next = (index + 1) % self.cursors.len();
-            let budget = SLICE
+            let budget = READ_SLICE
                 .min(cursor_allowance - cursor_spent)
                 .min(remaining_bytes);
             let cursor = &mut self.cursors[index];
@@ -835,7 +1054,7 @@ impl SelectedReader {
             let before = cursor.byte_offset;
             let mut candidate = None;
             let outcome = cursor.tail_bounded(
-                SLICE.min(remaining_bytes),
+                READ_SLICE.min(remaining_bytes),
                 1.min(remaining_work),
                 |offset, record| match record {
                     Ok(value) if value["type"].as_str() == Some("session_meta") => {
@@ -940,6 +1159,264 @@ fn append_unknown_record(path: &Path, fill: usize) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn finish_initial_load(reader: &mut SelectedReader) {
+        while reader.is_loading() {
+            reader.poll().unwrap();
+        }
+    }
+
+    #[test]
+    fn many_tiny_initial_rollouts_complete_in_one_poll() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut rollouts = Vec::new();
+        for index in 0..128 {
+            let id = format!("agent-{index:03}");
+            let path = temp.path().join(format!("rollout-{index:03}.jsonl"));
+            std::fs::write(&path, "").unwrap();
+            let parent = (index > 0).then(|| format!("agent-{:03}", index - 1));
+            let mut metadata = meta(path, "session", &id, parent.as_deref(), 0);
+            metadata.depth = Some(index as u64);
+            rollouts.push(metadata);
+        }
+        rollouts.reverse();
+        let root = rollouts
+            .iter()
+            .position(|metadata| metadata.thread_id == "agent-000")
+            .unwrap();
+        let group = SessionGroup {
+            session_id: "session".into(),
+            rollouts,
+            root,
+        };
+        let mut reader = SelectedReader::new(
+            group,
+            Vec::new(),
+            temp.path().to_owned(),
+            temp.path().to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(reader.state.agents.len(), 1);
+        assert!(reader.is_loading());
+        assert_eq!(
+            reader.poll().unwrap(),
+            PollOutcome::Updated {
+                records: 0,
+                admitted: 0
+            }
+        );
+        assert!(!reader.is_loading());
+        assert_eq!(reader.state.agents.len(), 128);
+        assert_eq!(reader.cursors.len(), 128);
+        assert_eq!(
+            reader.cursors[0].path,
+            temp.path().join("rollout-000.jsonl")
+        );
+        assert_eq!(
+            reader.cursors[127].path,
+            temp.path().join("rollout-127.jsonl")
+        );
+    }
+
+    #[test]
+    fn large_initial_history_uses_bulk_but_bounded_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("large.jsonl");
+        let record = format!(
+            "{{\"type\":\"mystery\",\"payload\":{{\"value\":\"{}\"}}}}\n",
+            "x".repeat(1024)
+        );
+        let mut history = String::new();
+        while history.len() <= INITIAL_LOAD_BYTE_BUDGET + READ_SLICE {
+            history.push_str(&record);
+        }
+        std::fs::write(&path, history).unwrap();
+        let group = SessionGroup {
+            session_id: "session".into(),
+            rollouts: vec![meta(path, "session", "session", None, 0)],
+            root: 0,
+        };
+        let mut reader = SelectedReader::new(
+            group,
+            Vec::new(),
+            temp.path().to_owned(),
+            temp.path().to_owned(),
+        )
+        .unwrap();
+
+        let outcome = reader.poll().unwrap();
+        let PollOutcome::Updated { records, .. } = outcome else {
+            panic!("unexpected rebuild");
+        };
+        let consumed = reader.initial_load.front().unwrap().cursor.byte_offset;
+        assert_eq!(consumed, INITIAL_LOAD_BYTE_BUDGET as u64);
+        assert!(consumed > APPEND_BUDGET as u64);
+        assert!(records > POLL_WORK_BUDGET);
+        assert!(records <= INITIAL_LOAD_WORK_BUDGET);
+        assert!(reader.is_loading());
+    }
+    #[test]
+    fn selected_reader_is_root_only_then_parent_first_and_equivalent() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ["root", "child", "grand"].map(|id| temp.path().join(format!("{id}.jsonl")));
+        std::fs::write(
+            &paths[0],
+            concat!(
+                "{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"ordinal\":2,\"type\":\"mystery\",\"payload\":{}}\n"
+            ),
+        )
+        .unwrap();
+        for path in &paths[1..] {
+            std::fs::write(
+                path,
+                "{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            )
+            .unwrap();
+        }
+        let mut root = meta(paths[0].clone(), "s", "root", None, 0);
+        root.depth = Some(0);
+        let mut child = meta(paths[1].clone(), "s", "child", Some("root"), 0);
+        child.depth = Some(1);
+        let mut grand = meta(paths[2].clone(), "s", "grand", Some("child"), 0);
+        grand.depth = Some(2);
+        let group = SessionGroup {
+            session_id: "s".into(),
+            rollouts: vec![grand, root, child],
+            root: 1,
+        };
+        let (expected, expected_cursors) = load_group(&group, temp.path()).unwrap();
+        let mut reader = SelectedReader::new(
+            group,
+            Vec::new(),
+            temp.path().to_owned(),
+            temp.path().to_owned(),
+        )
+        .unwrap();
+
+        assert!(reader.is_loading());
+        assert_eq!(reader.state.agents.len(), 1);
+        assert_eq!(
+            reader.state.agents["root"].latest_turn.status,
+            crate::model::TurnStatus::Pending
+        );
+        assert_eq!(reader.state.data_health.unknown_records, 0);
+        assert!(reader.cursors.is_empty());
+        assert_eq!(
+            reader
+                .initial_load
+                .iter()
+                .map(|load| load.meta.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "child", "grand"]
+        );
+
+        let mut appearances = Vec::new();
+        let mut previous = 1;
+        while reader.is_loading() {
+            if let PollOutcome::Updated { records, .. } = reader.poll().unwrap() {
+                assert!(records <= INITIAL_LOAD_WORK_BUDGET);
+            }
+            if reader.state.agents.len() > previous {
+                appearances.push(reader.state.agents.len());
+                previous = reader.state.agents.len();
+            }
+        }
+        assert_eq!(appearances, [3]);
+        assert!(!reader.is_loading());
+        for id in ["root", "child", "grand"] {
+            assert_eq!(
+                reader.state.agents[id].latest_turn.status,
+                expected.agents[id].latest_turn.status
+            );
+            assert_eq!(
+                reader.state.agents[id].last_ordinal,
+                expected.agents[id].last_ordinal
+            );
+        }
+        assert_eq!(
+            reader.state.data_health.unknown_records,
+            expected.data_health.unknown_records
+        );
+        let mut actual_offsets = reader
+            .cursors
+            .iter()
+            .map(|cursor| (&cursor.path, cursor.byte_offset))
+            .collect::<Vec<_>>();
+        let mut expected_offsets = expected_cursors
+            .iter()
+            .map(|cursor| (&cursor.path, cursor.byte_offset))
+            .collect::<Vec<_>>();
+        actual_offsets.sort();
+        expected_offsets.sort();
+        assert_eq!(actual_offsets, expected_offsets);
+    }
+
+    #[test]
+    fn initial_backlog_does_not_starve_live_or_pending_in_saturated_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = temp.path().join("root.jsonl");
+        let backlog_path = temp.path().join("backlog.jsonl");
+        let pending_path = temp.path().join("pending.jsonl");
+        std::fs::write(&root_path, "{}\n").unwrap();
+        let mut history = String::new();
+        let padding = "x".repeat(8 * 1024);
+        for ordinal in 0..3000 {
+            history.push_str(&format!(
+                "{{\"ordinal\":{ordinal},\"type\":\"mystery\",\"payload\":{{\"padding\":\"{padding}\"}}}}\n"
+            ));
+        }
+        std::fs::write(&backlog_path, history).unwrap();
+        for index in 0..=1024 {
+            std::fs::write(temp.path().join(format!("decoy-{index:04}.tmp")), "").unwrap();
+        }
+        let group = SessionGroup {
+            session_id: "s".into(),
+            rollouts: vec![
+                meta(root_path.clone(), "s", "root", None, 0),
+                meta(backlog_path, "s", "backlog", Some("root"), 0),
+            ],
+            root: 0,
+        };
+        let mut reader = SelectedReader::new(
+            group,
+            Vec::new(),
+            temp.path().to_owned(),
+            temp.path().to_owned(),
+        )
+        .unwrap();
+        reader.poll().unwrap();
+        assert!(reader.is_loading());
+        std::fs::write(&pending_path, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"child\",\"parent_thread_id\":\"root\",\"cli_version\":\"0.149.1\"}}\n").unwrap();
+        reader.known_paths.insert(pending_path.clone());
+        reader.pending.push(pending_path.clone());
+        reader.pending_cursors.insert(
+            pending_path.clone(),
+            RolloutCursor::from_path_start(pending_path),
+        );
+        let mut root = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root_path)
+            .unwrap();
+        writeln!(
+            root,
+            "{{\"ordinal\":9000,\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\"}}}}"
+        )
+        .unwrap();
+
+        let outcome = reader.poll().unwrap();
+        assert!(reader.is_loading());
+        assert!(
+            matches!(outcome, PollOutcome::Updated { records, admitted: 1 } if records <= 2048)
+        );
+        assert!(reader.state.agents.contains_key("child"));
+        assert_eq!(
+            reader.state.agents["root"].latest_turn.status,
+            crate::model::TurnStatus::Running
+        );
+    }
+
     fn meta(
         path: PathBuf,
         sid: &str,
@@ -953,7 +1430,9 @@ mod tests {
             thread_id: id.into(),
             parent_thread_id: parent.map(str::to_owned),
             cwd: None,
+            repository_url: None,
             timestamp: None,
+            modified_at: None,
             cli_version: "0.149.0".into(),
             agent_path: None,
             agent_role: None,
@@ -1011,6 +1490,38 @@ mod tests {
             c.tail(100, |_, _| {}).unwrap(),
             TailOutcome::RebuildRequired
         );
+    }
+
+    #[test]
+    fn record_budget_preserves_complete_buffered_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("buffered.jsonl");
+        std::fs::write(&path, b"{}\n{}\n{}\n").unwrap();
+        let mut cursor = RolloutCursor::from_start(path);
+        let mut offsets = Vec::new();
+
+        assert_eq!(
+            cursor
+                .tail_bounded(9, 1, |offset, value| {
+                    value.unwrap();
+                    offsets.push(offset);
+                })
+                .unwrap(),
+            TailOutcome::Records(1)
+        );
+        assert_eq!(cursor.byte_offset, 9);
+        assert_eq!(cursor.partial_line, b"{}\n{}\n");
+        assert_eq!(
+            cursor
+                .tail_bounded(0, 2, |offset, value| {
+                    value.unwrap();
+                    offsets.push(offset);
+                })
+                .unwrap(),
+            TailOutcome::Records(2)
+        );
+        assert_eq!(offsets, [0, 3, 6]);
+        assert!(cursor.partial_line.is_empty());
     }
     #[test]
     fn malformed_unknown_boundary_and_readonly() {
@@ -1082,6 +1593,7 @@ mod tests {
             t.path().to_owned(),
         )
         .unwrap();
+        finish_initial_load(&mut reader);
         std::fs::write(&child, concat!(
             "{bad}\n",
             "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"c\",\"parent_thread_id\":\"s\",\"cli_version\":\"0.149.1\",\"source\":{\"subagent\":{\"thread_spawn\":{\"agent_path\":\"/root/c\",\"agent_role\":\"worker\",\"depth\":1}}}}}\n",
@@ -1133,6 +1645,7 @@ mod tests {
         let mut reader =
             SelectedReader::new(group, Vec::new(), t.path().to_owned(), t.path().to_owned())
                 .unwrap();
+        finish_initial_load(&mut reader);
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -1166,10 +1679,7 @@ mod tests {
         let root = t.path().join("rollout-root.jsonl");
         std::fs::write(&root, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"abcdef\",\"id\":\"abcdef\",\"cli_version\":\"0.149.0-alpha.4.1\"}}\n").unwrap();
         let groups = group(discover(t.path()).unwrap().admitted);
-        assert_eq!(
-            select(&groups, Some("abc"), t.path()).unwrap().session_id,
-            "abcdef"
-        );
+        assert_eq!(select(&groups, Some("abc")).unwrap().session_id, "abcdef");
 
         let second = SessionGroup {
             session_id: "abcxyz".into(),
@@ -1184,13 +1694,8 @@ mod tests {
         let mut ambiguous = groups.clone();
         ambiguous.push(second);
         ambiguous.push(exact);
-        assert_eq!(
-            select(&ambiguous, Some("abc"), t.path())
-                .unwrap()
-                .session_id,
-            "abc"
-        );
-        assert!(select(&ambiguous, Some("ab"), t.path())
+        assert_eq!(select(&ambiguous, Some("abc")).unwrap().session_id, "abc");
+        assert!(select(&ambiguous, Some("ab"))
             .unwrap_err()
             .to_string()
             .contains("ambiguous"));
@@ -1202,6 +1707,7 @@ mod tests {
             t.path().to_owned(),
         )
         .unwrap();
+        finish_initial_load(&mut reader);
         for index in 0..=1024 {
             std::fs::write(t.path().join(format!("decoy-{index:04}.tmp")), "").unwrap();
         }
@@ -1293,6 +1799,7 @@ mod tests {
             temp.path().to_owned(),
         )
         .unwrap();
+        finish_initial_load(&mut reader);
         let initial = reader
             .cursors
             .iter()
@@ -1325,7 +1832,7 @@ mod tests {
                 &path,
                 format!(
                     "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"s\",\"id\":\"p{index}\",\"parent_thread_id\":\"s\",\"cli_version\":\"0.149.1\",\"padding\":\"{}\"}}}}\n",
-                    "x".repeat(30 * 1024)
+                    "x".repeat(40 * 1024)
                 ),
             )
             .unwrap();
@@ -1377,6 +1884,7 @@ mod tests {
             temp.path().to_owned(),
         )
         .unwrap();
+        finish_initial_load(&mut reader);
         for path in &paths {
             let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
             for ordinal in 0..3000 {
@@ -1473,6 +1981,7 @@ mod tests {
             temp.path().to_owned(),
         )
         .unwrap();
+        finish_initial_load(&mut reader);
 
         let pending = temp.path().join("rollout-replaced.jsonl");
         let prefix = "{\"type\":\"session_meta\",\"payload\":{";
@@ -1523,7 +2032,9 @@ mod tests {
             cwd: Option<&Path>,
         ) -> RolloutMetadata {
             let mut value = meta(PathBuf::from(thread), session, thread, parent, 0);
-            value.timestamp = Some(format!("2026-01-01T00:00:{seconds:02}Z").parse().unwrap());
+            let time = format!("2026-01-01T00:00:{seconds:02}Z").parse().unwrap();
+            value.timestamp = Some(time);
+            value.modified_at = Some(time);
             value.cwd = cwd.map(Path::to_owned);
             value
         }
@@ -1545,14 +2056,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["d", "c", "a", "b"]
         );
-        assert_eq!(select(&groups, None, cwd).unwrap().session_id, "a");
-        assert_eq!(
-            select(&groups, None, Path::new("/absent"))
-                .unwrap()
-                .session_id,
-            "d"
-        );
-        assert_eq!(select(&groups, Some("b"), cwd).unwrap().session_id, "b");
+        assert_eq!(select(&groups, None).unwrap().session_id, "d");
+        assert_eq!(select(&groups, Some("b")).unwrap().session_id, "b");
     }
 
     #[test]
@@ -1573,6 +2078,7 @@ mod tests {
             temp.path().to_owned(),
         )
         .unwrap();
+        finish_initial_load(&mut reader);
 
         let malformed = temp.path().join("rollout-malformed.jsonl");
         std::fs::write(
