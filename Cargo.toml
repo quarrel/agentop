@@ -2,6 +2,20 @@
 name = "agentop"
 version = "0.1.0"
 edition = "2021"
+description = "A read-only terminal UI for observing Codex multi-agent rollout sessions"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/quarrel/agentop"
+readme = "README.md"
+keywords = ["codex", "tui", "agents", "observability"]
+categories = ["command-line-utilities", "development-tools"]
+include = [
+    "src/**",
+    "schemas/codex/rollout-line/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE.md",
+]
 
 [dependencies]
 anyhow = "1"

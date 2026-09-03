@@ -1,6 +1,16 @@
 # Agentop
 
-Agentop is a private Rust terminal UI for observing live Codex multi-agent work. It reconstructs an agent tree and recent activity by reading rollout JSONL files without modifying them.
+Agentop is a Rust terminal UI for observing live Codex multi-agent work. It reconstructs an agent tree and recent activity by reading rollout JSONL files without modifying them.
+
+## Install
+
+Install directly from the repository:
+
+```bash
+cargo install --git https://github.com/quarrel/agentop.git
+```
+
+From a local checkout, use `cargo install --path .`. The crates.io package name [`agentop`](https://crates.io/crates/agentop) is already owned by another Codex agent observer, which inspects running processes rather than reconstructing rollout history, so `cargo install agentop` does not install this repository. Publishing through crates.io will require a distinct package name; that package can still install an executable named `agentop`.
 
 ## Run
 
@@ -16,9 +26,9 @@ With no `--session`, Agentop opens a global session browser ordered by the great
 cargo run -- --sessions-dir "$HOME/.codex/sessions" --session 01abc
 ```
 
-Within a session tree, use Up/Down or j/k to select an agent, Enter to open its bounded interaction history, h to hide or show completed agents, and r to rescan. Hidden completed parents do not hide live descendants; those descendants are promoted one visual level. The interaction view shows agent context in its header and pairs each tool invocation into one privacy-safe entry with observed return state and elapsed duration; commands and tool outputs are never retained. Use Up/k for older entries and Down/j for newer entries. Esc returns one level and q exits from anywhere. `--color=auto` is the default and enables a restrained semantic palette because an interactive TTY is required. Use `--color=none` to disable every explicit foreground and background colour; labels, the `›` selection marker, and bold/reversed selection attributes remain available as non-colour cues.
+Within a session tree, use Up/Down or j/k to select an agent, Enter to open its bounded interaction history, h to hide or show completed agents, and r to rescan. Hidden completed parents do not hide live descendants; those descendants are promoted one visual level. The interaction view shows agent context in its header and pairs each tool invocation into one entry with observed return state and elapsed duration. Tool rows use bounded, sanitised action summaries: direct calls can show a selected query, path, target, or command, while Codex `exec` wrappers are reduced to the nested tool names and grouped call counts they contain. Raw tool inputs and outputs are never retained. Use Up/k for older entries and Down/j for newer entries. Esc returns one level and q exits from anywhere. `--color=auto` is the default and enables a restrained semantic palette because an interactive TTY is required. Use `--color=none` to disable every explicit foreground and background colour; labels, the `›` selection marker, and bold/reversed selection attributes remain available as non-colour cues.
 
-The screen shows each agent's model and reasoning effort before its latest-turn lifecycle, followed by known timestamps, meaningful activity, reasoning summaries, messages, and final results when available. Healthy schema-catalogue and compatibility values stay out of the way; missing schemas, unknown compatibility, and malformed or oversized session records appear in red. Unknown record/event counts and raw parser diagnostics are retained internally but omitted from normal agent details because they are session-wide development evidence rather than actionable per-agent state. Opening a session shows its root promptly and reduces existing history in bounded batches. Each initial catch-up poll has a separate 8 MiB/65,536-record budget while reserving the original 256 KiB/2,048-work allowance for live tails, discovery, and pending children. The event loop runs successive bounded polls for up to roughly 100 ms before redrawing, checking for terminal input between polls; saturated loading windows continue without an artificial inter-window delay. Ordinary live polling then settles to about one second. A running agent whose newest unfinished call is exactly `wait_agent` is labelled `WAITING ON AGENT ↓`, while its activity remains `wait_agent`. Once loading has caught up, a non-root agent still recorded as running is labelled `STALE` in yellow only when the same session contains meaningful agent activity at least two hours later; this means its observation stream is stale and completion remains unknown, so completed-agent filtering does not hide it.
+The screen shows each agent's model and reasoning effort before its latest-turn lifecycle, followed by known timestamps, meaningful activity, reasoning summaries, messages, and final results when available. Healthy schema-catalogue and compatibility values stay out of the way; missing schemas, unknown compatibility, and malformed or oversized session records appear in red. Unknown record/event counts and raw parser diagnostics are retained internally but omitted from normal agent details because they are session-wide development evidence rather than actionable per-agent state. Opening a session shows its root promptly and reduces existing history in bounded batches. Each initial catch-up poll has a separate 8 MiB/65,536-record budget while reserving the original 256 KiB/2,048-work allowance for live tails, discovery, and pending children. The event loop runs successive bounded polls for up to roughly 100 ms before redrawing, checking for terminal input between polls; saturated loading windows continue without an artificial inter-window delay. Ordinary live polling then settles to about one second. A correlated `spawn_agent` result in a tailed rollout prioritises discovery in the result timestamp's session-date directory; the bounded recursive scan remains the recovery path. A running agent whose newest unfinished call is exactly `wait_agent` is labelled `WAITING ON AGENT ↓`, while its activity remains `wait_agent`. Once loading has caught up, a non-root agent still recorded as running is labelled `STALE` in yellow when a later complete `list_agents` snapshot covering its path no longer includes it. When no such snapshot exists, at least two hours of later meaningful activity elsewhere in the session provides the conservative fallback. Both forms mean completion remains unknown, and completed-agent filtering does not hide the agent.
 
 ## Update the schema catalogue
 
@@ -53,4 +63,4 @@ Schema catalogue and contributor workflows are documented in [docs/DEVELOPMENT.m
 
 ## Licence
 
-This repository is proprietary and confidential. See [LICENSE.md](LICENSE.md).
+Agentop is licensed under the GNU General Public License, version 2 or any later version. See [LICENSE.md](LICENSE.md).

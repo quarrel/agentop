@@ -1,6 +1,6 @@
 use crate::model::{
     AgentInteraction, AgentState, CoverageLevel, DataHealth, InteractionKind, SessionState,
-    ToolInteractionState, TurnStatus,
+    StaleEvidence, ToolInteractionState, TurnStatus,
 };
 use crate::rollout::{self, Discovery, PollOutcome, SelectedReader, SessionGroup};
 use anyhow::{Context, Result};
@@ -31,7 +31,6 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
 const INITIAL_LOADING_WORK_WINDOW: Duration = Duration::from_millis(100);
 const RENDER_TEXT_LIMIT: usize = 256;
-const STALE_AFTER_SESSION_PROGRESS_SECONDS: i64 = 2 * 60 * 60;
 const _: fn(&SessionGroup, &SessionState) -> Vec<String> = crate::rollout::tree_lines;
 
 fn update_interval(loading: bool) -> Duration {
@@ -895,12 +894,12 @@ fn draw(
         chunks[0],
     );
 
-    let stale_reference = stale_reference_for_display(state, loading, ui.catching_up);
     let items = rows
         .iter()
         .map(|row| {
             let agent = &state.agents[&row.thread_id];
-            ListItem::new(tree_line(row, agent, stale_reference, palette))
+            let stale_evidence = stale_evidence_for_display(state, agent, loading);
+            ListItem::new(tree_line(row, agent, stale_evidence, palette))
         })
         .collect::<Vec<_>>();
     let mut list_state = ListState::default();
@@ -928,12 +927,14 @@ fn draw(
         .selected_thread
         .as_ref()
         .and_then(|id| state.agents.get(id));
+    let selected_stale_evidence =
+        selected.and_then(|agent| stale_evidence_for_display(state, agent, loading));
     frame.render_widget(
         Paragraph::new(detail_lines(
             selected,
             state,
             group,
-            stale_reference,
+            selected_stale_evidence,
             palette,
         ))
         .block(
@@ -1103,7 +1104,7 @@ fn history_header(
     agent: &AgentState,
     retained: usize,
     progress: &str,
-    stale_reference: Option<DateTime<Utc>>,
+    stale_evidence: Option<StaleEvidence>,
     palette: Palette,
 ) -> Line<'static> {
     let mut spans = vec![
@@ -1129,8 +1130,8 @@ fn history_header(
     }
     spans.push(Span::raw(" · "));
     spans.push(Span::styled(
-        lifecycle_status(agent, stale_reference),
-        lifecycle_style(agent, stale_reference, palette),
+        lifecycle_status(agent, stale_evidence),
+        lifecycle_style(agent, stale_evidence, palette),
     ));
     if let Some(last_activity_at) = agent.last_activity_at {
         spans.push(Span::styled(
@@ -1177,13 +1178,13 @@ fn draw_history(
     } else {
         ""
     };
-    let stale_reference = stale_reference_for_display(state, loading, catching_up);
+    let stale_evidence = stale_evidence_for_display(state, agent, loading);
     frame.render_widget(
         Paragraph::new(history_header(
             agent,
             agent.interactions.len(),
             progress,
-            stale_reference,
+            stale_evidence,
             palette,
         ))
         .block(
@@ -1255,12 +1256,12 @@ fn draw_history(
 fn tree_line(
     row: &TreeRow,
     agent: &AgentState,
-    stale_reference: Option<DateTime<Utc>>,
+    stale_evidence: Option<StaleEvidence>,
     palette: Palette,
 ) -> Line<'static> {
     let label = render_text(agent_label(agent));
-    let status = lifecycle_status(agent, stale_reference);
-    let status_style = lifecycle_style(agent, stale_reference, palette);
+    let status = lifecycle_status(agent, stale_evidence);
+    let status_style = lifecycle_style(agent, stale_evidence, palette);
     let branch = agent.parent_thread_id.as_ref().map_or("", |_| "↪ ");
     let mut spans = vec![Span::raw(format!(
         "{}{branch}{label}  ",
@@ -1313,7 +1314,7 @@ fn detail_lines(
     agent: Option<&AgentState>,
     state: &SessionState,
     group: &SessionGroup,
-    stale_reference: Option<DateTime<Utc>>,
+    stale_evidence: Option<StaleEvidence>,
     palette: Palette,
 ) -> Vec<Line<'static>> {
     let Some(agent) = agent else {
@@ -1370,8 +1371,7 @@ fn detail_lines(
     }
     lines.push(Line::from(metadata_spans));
 
-    let stale = stale_running_agent(agent, stale_reference);
-    let mut lifecycle = vec![lifecycle_status(agent, stale_reference).to_owned()];
+    let mut lifecycle = vec![lifecycle_status(agent, stale_evidence).to_owned()];
     if let Some(turn_id) = agent.latest_turn.turn_id.as_deref() {
         lifecycle.push(format!("turn {}", render_text(turn_id)));
     }
@@ -1388,13 +1388,18 @@ fn detail_lines(
         lifecycle.push(format!("last activity {}", timestamp(Some(last_activity))));
     }
     lines.push(labelled_line("lifecycle", lifecycle.join(" · "), palette));
-    if stale {
+    if let Some(evidence) = stale_evidence {
+        let explanation = match evidence {
+            StaleEvidence::LaterAgentListSnapshot => {
+                "a later complete list_agents snapshot no longer included this agent; completion unknown"
+            }
+            StaleEvidence::LaterSessionActivity => {
+                "session activity continued for at least 2h after this agent's last activity; completion unknown"
+            }
+        };
         lines.push(Line::from(vec![
             Span::styled("stale: ", palette.title()),
-            Span::styled(
-                "session activity continued for at least 2h after this agent's last activity; completion unknown",
-                palette.warning(),
-            ),
+            Span::styled(explanation, palette.warning()),
         ]));
     }
 
@@ -1434,11 +1439,7 @@ fn detail_lines(
         lines.push(labelled_line("final", render_text(final_message), palette));
     }
     if let Some(claim) = agent.result_status_claim.as_deref() {
-        lines.push(labelled_line(
-            "result",
-            render_text(claim),
-            palette,
-        ));
+        lines.push(labelled_line("result", render_text(claim), palette));
     }
 
     let health = &state.data_health;
@@ -1458,41 +1459,20 @@ fn detail_lines(
     lines
 }
 
-fn session_latest_activity(state: &SessionState) -> Option<DateTime<Utc>> {
-    state
-        .agents
-        .values()
-        .filter_map(|agent| agent.last_activity_at)
-        .max()
-}
-
-fn stale_reference_for_display(
+fn stale_evidence_for_display(
     state: &SessionState,
+    agent: &AgentState,
     loading: bool,
-    catching_up: bool,
-) -> Option<DateTime<Utc>> {
-    if loading || catching_up {
+) -> Option<StaleEvidence> {
+    if loading {
         None
     } else {
-        session_latest_activity(state)
+        state.stale_evidence(agent)
     }
 }
 
-fn stale_running_agent(agent: &AgentState, stale_reference: Option<DateTime<Utc>>) -> bool {
-    agent.parent_thread_id.is_some()
-        && agent.latest_turn.status == TurnStatus::Running
-        && agent.last_activity_at.is_some_and(|last_activity| {
-            stale_reference.is_some_and(|latest_activity| {
-                latest_activity
-                    .signed_duration_since(last_activity)
-                    .num_seconds()
-                    >= STALE_AFTER_SESSION_PROGRESS_SECONDS
-            })
-        })
-}
-
-fn lifecycle_status(agent: &AgentState, stale_reference: Option<DateTime<Utc>>) -> &'static str {
-    if stale_running_agent(agent, stale_reference) {
+fn lifecycle_status(agent: &AgentState, stale_evidence: Option<StaleEvidence>) -> &'static str {
+    if stale_evidence.is_some() {
         "STALE"
     } else if agent.is_waiting_on_agent() {
         "WAITING ON AGENT ↓"
@@ -1503,10 +1483,10 @@ fn lifecycle_status(agent: &AgentState, stale_reference: Option<DateTime<Utc>>) 
 
 fn lifecycle_style(
     agent: &AgentState,
-    stale_reference: Option<DateTime<Utc>>,
+    stale_evidence: Option<StaleEvidence>,
     palette: Palette,
 ) -> Style {
-    if stale_running_agent(agent, stale_reference) {
+    if stale_evidence.is_some() {
         return palette.warning();
     }
     match agent.latest_turn.status {
@@ -1586,6 +1566,7 @@ fn abbreviate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::STALE_AFTER_SESSION_PROGRESS_SECONDS;
     use crate::rollout::RolloutMetadata;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
@@ -1633,9 +1614,9 @@ mod tests {
             depth: 0,
         };
         let palette = Palette::new(ColorMode::None);
-        let stale_reference = session_latest_activity(state);
-        let tree = line_text(&tree_line(&row, agent, stale_reference, palette));
-        let detail = detail_lines(Some(agent), state, group, stale_reference, palette)
+        let stale_evidence = state.stale_evidence(agent);
+        let tree = line_text(&tree_line(&row, agent, stale_evidence, palette));
+        let detail = detail_lines(Some(agent), state, group, stale_evidence, palette)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -1958,7 +1939,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_requires_later_session_evidence_and_preserves_visibility() {
+    fn stale_requires_later_session_evidence_and_survives_live_updates() {
         let (group, mut state) = fixture();
         let agent_activity = DateTime::from_timestamp(0, 0).unwrap();
         let before_threshold =
@@ -1973,25 +1954,47 @@ mod tests {
         }
 
         let child = state.agents.get("child").unwrap();
-        assert_eq!(lifecycle_status(child, None), "RUNNING");
-        assert_eq!(lifecycle_status(child, Some(before_threshold)), "RUNNING");
-        assert_eq!(lifecycle_status(child, Some(at_threshold)), "STALE");
+        assert_eq!(state.stale_evidence(child), None);
+        state.agents.get_mut("root").unwrap().last_activity_at = Some(before_threshold);
+        assert_eq!(state.stale_evidence(&state.agents["child"]), None);
+        state.agents.get_mut("root").unwrap().last_activity_at = Some(at_threshold);
         assert_eq!(
-            lifecycle_style(child, Some(at_threshold), Palette::new(ColorMode::Auto)).fg,
+            state.stale_evidence(&state.agents["child"]),
+            Some(StaleEvidence::LaterSessionActivity)
+        );
+        assert_eq!(
+            stale_evidence_for_display(&state, &state.agents["child"], true),
+            None
+        );
+        let mut updating_ui = UiState::default();
+        assert!(note_poll(
+            &mut updating_ui,
+            PollOutcome::Updated {
+                records: 1,
+                admitted: 0,
+            }
+        ));
+        assert!(updating_ui.catching_up);
+        let stale_evidence = stale_evidence_for_display(&state, &state.agents["child"], false);
+        assert_eq!(
+            lifecycle_status(&state.agents["child"], stale_evidence),
+            "STALE"
+        );
+        assert_eq!(
+            lifecycle_style(
+                &state.agents["child"],
+                stale_evidence,
+                Palette::new(ColorMode::Auto)
+            )
+            .fg,
             Some(Color::Yellow)
         );
-
-        state.agents.get_mut("root").unwrap().last_activity_at = Some(at_threshold);
-        assert_eq!(stale_reference_for_display(&state, true, false), None);
-        assert_eq!(stale_reference_for_display(&state, false, true), None);
-        let stale_reference = stale_reference_for_display(&state, false, false);
-        assert_eq!(stale_reference, Some(at_threshold));
         let visible = flatten(&group, &state, true);
         assert!(visible.iter().any(|row| row.thread_id == "child"));
 
         let child = state.agents.get("child").unwrap();
         let row = visible.iter().find(|row| row.thread_id == "child").unwrap();
-        let tree = tree_line(row, child, stale_reference, Palette::new(ColorMode::Auto));
+        let tree = tree_line(row, child, stale_evidence, Palette::new(ColorMode::Auto));
         let stale_status = tree
             .spans
             .iter()
@@ -2003,7 +2006,7 @@ mod tests {
             Some(child),
             &state,
             &group,
-            stale_reference,
+            stale_evidence,
             Palette::new(ColorMode::Auto),
         );
         let stale_detail = details
@@ -2012,16 +2015,28 @@ mod tests {
             .unwrap();
         assert_eq!(stale_detail.spans[0].style.fg, Some(Color::Cyan));
         assert_eq!(stale_detail.spans[1].style.fg, Some(Color::Yellow));
+        assert!(line_text(stale_detail).contains("at least 2h"));
         assert!(line_text(stale_detail).contains("completion unknown"));
+
+        let snapshot_details = detail_lines(
+            Some(child),
+            &state,
+            &group,
+            Some(StaleEvidence::LaterAgentListSnapshot),
+            Palette::new(ColorMode::Auto),
+        );
+        assert!(snapshot_details
+            .iter()
+            .any(|line| line_text(line).contains("later complete list_agents snapshot")));
 
         let root = state.agents.get_mut("root").unwrap();
         root.latest_turn.status = TurnStatus::Running;
         root.last_activity_at = Some(agent_activity);
-        assert_eq!(lifecycle_status(root, Some(at_threshold)), "RUNNING");
+        assert_eq!(state.stale_evidence(&state.agents["root"]), None);
 
         let child = state.agents.get_mut("child").unwrap();
         child.latest_turn.status = TurnStatus::Completed;
-        assert_eq!(lifecycle_status(child, Some(at_threshold)), "COMPLETED");
+        assert_eq!(state.stale_evidence(&state.agents["child"]), None);
     }
 
     #[test]

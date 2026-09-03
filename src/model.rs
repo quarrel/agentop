@@ -6,6 +6,10 @@ use std::path::PathBuf;
 const TEXT_LIMIT: usize = 512;
 const DIAGNOSTIC_LIMIT: usize = 20;
 const INTERACTION_LIMIT: usize = 256;
+const AGENT_LIST_SNAPSHOT_LIMIT: usize = 64;
+const AGENT_LIST_MEMBER_LIMIT: usize = 1_024;
+const SPAWN_HINT_LIMIT: usize = 64;
+pub const STALE_AFTER_SESSION_PROGRESS_SECONDS: i64 = 2 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageLevel {
@@ -63,6 +67,45 @@ pub enum ToolInteractionState {
     Open,
     Returned,
     EndedWithoutReturn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleEvidence {
+    LaterAgentListSnapshot,
+    LaterSessionActivity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentListScope {
+    All,
+    PathPrefix(String),
+}
+
+impl AgentListScope {
+    fn covers(&self, agent_path: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::PathPrefix(prefix) => {
+                agent_path == prefix
+                    || agent_path
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AgentListSnapshot {
+    observed_at: DateTime<Utc>,
+    scope: AgentListScope,
+    agent_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedAgentHint {
+    pub agent_path: String,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +187,9 @@ pub struct AgentState {
     pub result_status_claim: Option<String>,
     pub last_communication: Option<String>,
     pub last_ordinal: Option<u64>,
+    agent_list_calls: HashMap<String, AgentListScope>,
+    agent_list_snapshots: VecDeque<AgentListSnapshot>,
+    spawned_agent_hints: VecDeque<SpawnedAgentHint>,
 }
 impl AgentState {
     pub fn new(thread_id: String, cli_version: String) -> Self {
@@ -172,6 +218,9 @@ impl AgentState {
             result_status_claim: None,
             last_communication: None,
             last_ordinal: None,
+            agent_list_calls: HashMap::new(),
+            agent_list_snapshots: VecDeque::new(),
+            spawned_agent_hints: VecDeque::new(),
         }
     }
     pub fn current_activity(&self) -> Option<&str> {
@@ -247,13 +296,13 @@ impl AgentState {
 
     fn start_tool_interaction(
         &mut self,
-        tool_name: &str,
+        summary: &str,
         timestamp: Option<DateTime<Utc>>,
         ordinal: Option<u64>,
     ) -> u64 {
         self.push_interaction(
             InteractionKind::Tool,
-            tool_name,
+            summary,
             timestamp,
             ordinal,
             Some(ToolInteractionState::Open),
@@ -291,6 +340,30 @@ impl AgentState {
                 ToolInteractionState::EndedWithoutReturn,
             );
         }
+        self.agent_list_calls.clear();
+    }
+
+    fn record_agent_list_snapshot(
+        &mut self,
+        scope: AgentListScope,
+        observed_at: DateTime<Utc>,
+        agent_paths: Vec<String>,
+    ) {
+        if self.agent_list_snapshots.len() == AGENT_LIST_SNAPSHOT_LIMIT {
+            self.agent_list_snapshots.pop_front();
+        }
+        self.agent_list_snapshots.push_back(AgentListSnapshot {
+            observed_at,
+            scope,
+            agent_paths,
+        });
+    }
+
+    fn record_spawned_agent_hint(&mut self, hint: SpawnedAgentHint) {
+        if self.spawned_agent_hints.len() == SPAWN_HINT_LIMIT {
+            self.spawned_agent_hints.pop_front();
+        }
+        self.spawned_agent_hints.push_back(hint);
     }
 }
 
@@ -301,6 +374,63 @@ pub struct SessionState {
     pub started_at: Option<DateTime<Utc>>,
     pub agents: HashMap<String, AgentState>,
     pub data_health: DataHealth,
+}
+
+impl SessionState {
+    pub fn stale_evidence(&self, agent: &AgentState) -> Option<StaleEvidence> {
+        if agent.parent_thread_id.is_none() || agent.latest_turn.status != TurnStatus::Running {
+            return None;
+        }
+        let last_activity = agent.last_activity_at?;
+
+        if let Some(agent_path) = agent
+            .agent_path
+            .as_deref()
+            .and_then(canonical_agent_path_or_none)
+        {
+            let excluded_by_later_snapshot = self
+                .agents
+                .values()
+                .flat_map(|observer| observer.agent_list_snapshots.iter())
+                .any(|snapshot| {
+                    snapshot.observed_at > last_activity
+                        && snapshot.scope.covers(&agent_path)
+                        && !snapshot
+                            .agent_paths
+                            .iter()
+                            .any(|observed| observed == &agent_path)
+                });
+            if excluded_by_later_snapshot {
+                return Some(StaleEvidence::LaterAgentListSnapshot);
+            }
+        }
+
+        self.agents
+            .values()
+            .filter_map(|candidate| candidate.last_activity_at)
+            .max()
+            .filter(|latest_activity| {
+                latest_activity
+                    .signed_duration_since(last_activity)
+                    .num_seconds()
+                    >= STALE_AFTER_SESSION_PROGRESS_SECONDS
+            })
+            .map(|_| StaleEvidence::LaterSessionActivity)
+    }
+
+    pub fn take_spawned_agent_hints(&mut self) -> Vec<SpawnedAgentHint> {
+        let mut hints = self
+            .agents
+            .values_mut()
+            .flat_map(|agent| agent.spawned_agent_hints.drain(..))
+            .collect::<Vec<_>>();
+        hints.sort_by(|left, right| {
+            left.observed_at
+                .cmp(&right.observed_at)
+                .then_with(|| left.agent_path.cmp(&right.agent_path))
+        });
+        hints
+    }
 }
 
 pub fn parse_time(v: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -316,7 +446,8 @@ pub fn sanitise(input: &str) -> String {
     let mut out = String::new();
     let mut escape = false;
     let mut truncated = false;
-    for ch in input.chars() {
+    let mut characters = input.chars().peekable();
+    while let Some(ch) = characters.next() {
         if escape {
             if ch == '[' {
                 continue;
@@ -330,7 +461,17 @@ pub fn sanitise(input: &str) -> String {
             escape = true;
             continue;
         }
-        let emitted = if ch.is_control() { '�' } else { ch };
+        let emitted = match ch {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                '↩'
+            }
+            '\n' => '↩',
+            _ if ch.is_control() => '�',
+            _ => ch,
+        };
         if out.len() + emitted.len_utf8() > TEXT_LIMIT {
             truncated = true;
             break;
@@ -353,6 +494,65 @@ fn plain_text(content: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     (!text.is_empty()).then_some(text)
+}
+
+fn canonical_agent_path_or_none(path: &str) -> Option<String> {
+    let sanitised = sanitise(path);
+    if sanitised != path || !(path == "/root" || path.starts_with("/root/")) {
+        return None;
+    }
+    Some(sanitised)
+}
+
+fn parse_spawned_agent_path_or_none(payload: &Value) -> Option<String> {
+    let output = payload.get("output").and_then(Value::as_str)?;
+    let output: Value = serde_json::from_str(output).ok()?;
+    canonical_agent_path_or_none(output.get("task_name")?.as_str()?)
+}
+
+fn parse_agent_list_scope_or_none(payload: &Value) -> Option<AgentListScope> {
+    if payload.get("name").and_then(Value::as_str) != Some("list_agents") {
+        return None;
+    }
+    let arguments = payload.get("arguments").and_then(Value::as_str)?;
+    let arguments: Value = serde_json::from_str(arguments).ok()?;
+    let arguments = arguments.as_object()?;
+    if arguments.keys().any(|key| key != "path_prefix") {
+        return None;
+    }
+    match arguments.get("path_prefix") {
+        None => Some(AgentListScope::All),
+        Some(Value::String(prefix)) => {
+            canonical_agent_path_or_none(prefix).map(AgentListScope::PathPrefix)
+        }
+        Some(_) => None,
+    }
+}
+
+fn parse_agent_list_paths_or_none(payload: &Value) -> Option<Vec<String>> {
+    let output = payload.get("output").and_then(Value::as_str)?;
+    let output: Value = serde_json::from_str(output).ok()?;
+    let output = output.as_object()?;
+    if output.len() != 1 {
+        return None;
+    }
+    let agents = output.get("agents")?.as_array()?;
+    if agents.len() > AGENT_LIST_MEMBER_LIMIT {
+        return None;
+    }
+    let mut paths = Vec::with_capacity(agents.len());
+    for listed_agent in agents {
+        let listed_agent = listed_agent.as_object()?;
+        let path = listed_agent.get("agent_name")?.as_str()?;
+        let status = listed_agent.get("agent_status")?.as_str()?;
+        if status.is_empty() {
+            return None;
+        }
+        paths.push(canonical_agent_path_or_none(path)?);
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    Some(paths)
 }
 fn reasoning_summary(payload: &Value) -> Option<String> {
     payload
@@ -377,7 +577,250 @@ fn summary_for_call(payload: &Value) -> String {
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("tool");
-    sanitise(if name == "exec" { "running exec" } else { name })
+    let summary = if name == "exec" {
+        payload
+            .get("input")
+            .and_then(Value::as_str)
+            .and_then(summary_for_exec)
+            .unwrap_or_else(|| "exec".into())
+    } else if let Some(detail) = direct_tool_detail(name, payload) {
+        format!("{} — {detail}", humanise_tool_name(name))
+    } else {
+        name.to_owned()
+    };
+    sanitise(&summary)
+}
+
+fn summary_for_exec(input: &str) -> Option<String> {
+    const INPUT_SCAN_LIMIT: usize = 64 * 1024;
+    let mut end = input.len().min(INPUT_SCAN_LIMIT);
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let input = &input[..end];
+    let calls = nested_tool_names(input);
+    if calls.is_empty() {
+        return None;
+    }
+    if calls.len() == 1 {
+        let name = &calls[0];
+        let mut summary = humanise_tool_name(name);
+        if let Some(key) = tool_detail_key(name) {
+            if let Some(detail) = js_string_property(input, key) {
+                summary.push_str(" — ");
+                summary.push_str(&detail);
+            }
+        }
+        return Some(summary);
+    }
+
+    let mut grouped = Vec::<(String, usize)>::new();
+    for name in calls {
+        let label = humanise_tool_name(&name);
+        if let Some((_, count)) = grouped.iter_mut().find(|(known, _)| *known == label) {
+            *count += 1;
+        } else {
+            grouped.push((label, 1));
+        }
+    }
+    Some(
+        grouped
+            .into_iter()
+            .map(|(label, count)| {
+                if count == 1 {
+                    label
+                } else {
+                    format!("{label} · {count} calls")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+fn nested_tool_names(input: &str) -> Vec<String> {
+    const CALL_LIMIT: usize = 32;
+    let bytes = input.as_bytes();
+    let mut names = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+
+    while index < bytes.len() && names.len() < CALL_LIMIT {
+        if let Some(terminator) = quote {
+            if bytes[index] == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[index] == terminator {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(bytes[index]);
+                index += 1;
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            _ => {}
+        }
+
+        if bytes[index..].starts_with(b"tools.") {
+            let start = index + "tools.".len();
+            let mut finish = start;
+            while finish < bytes.len()
+                && (bytes[finish].is_ascii_alphanumeric() || bytes[finish] == b'_')
+            {
+                finish += 1;
+            }
+            if finish > start {
+                names.push(String::from_utf8_lossy(&bytes[start..finish]).into_owned());
+                index = finish;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    names
+}
+
+fn humanise_tool_name(name: &str) -> String {
+    if name == "exec_command" {
+        return "Command".into();
+    }
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        if let Some((server, tool)) = rest.split_once("__") {
+            let tool = tool
+                .strip_prefix(server)
+                .and_then(|suffix| suffix.strip_prefix('_'))
+                .unwrap_or(tool);
+            return format!("{} {}", humanise_identifier(server), tool.replace('_', " "));
+        }
+    }
+    humanise_identifier(name)
+}
+
+fn humanise_identifier(value: &str) -> String {
+    let value = value.replace("__", " ").replace('_', " ");
+    let mut characters = value.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => "Tool".into(),
+    }
+}
+
+fn tool_detail_key(name: &str) -> Option<&'static str> {
+    match name {
+        "exec_command" => Some("cmd"),
+        "send_message" | "followup_task" => Some("target"),
+        "spawn_agent" => Some("task_name"),
+        "list_agents" => Some("path_prefix"),
+        "view_image" => Some("path"),
+        "read_mcp_resource" => Some("uri"),
+        "request_plugin_install" => Some("plugin_id"),
+        _ if name.ends_with("search") => Some("query"),
+        _ if name.ends_with("read") => Some("path"),
+        _ => None,
+    }
+}
+
+fn direct_tool_detail(name: &str, payload: &Value) -> Option<String> {
+    let key = tool_detail_key(name)?;
+    let parsed = payload
+        .get("arguments")
+        .and_then(Value::as_str)
+        .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok());
+    let arguments = parsed
+        .as_ref()
+        .or_else(|| payload.get("arguments"))
+        .and_then(Value::as_object)?;
+    arguments.get(key).and_then(Value::as_str).map(sanitise)
+}
+
+fn js_string_property(source: &str, key: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    for (index, _) in source.match_indices(key) {
+        if index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_') {
+            continue;
+        }
+        let mut cursor = index + key.len();
+        if bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+        {
+            cursor += 1;
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b':') {
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let quote = *bytes.get(cursor)?;
+        if !matches!(quote, b'\'' | b'"' | b'`') {
+            continue;
+        }
+        if quote == b'"' {
+            let mut finish = cursor + 1;
+            while finish < bytes.len() {
+                if bytes[finish] == b'\\' {
+                    finish = (finish + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[finish] == b'"' {
+                    return serde_json::from_str::<String>(&source[cursor..=finish])
+                        .ok()
+                        .map(|value| sanitise(&value));
+                }
+                finish += 1;
+            }
+            return None;
+        }
+
+        let mut value = String::new();
+        let mut escaped = false;
+        for character in source[cursor + 1..].chars() {
+            if escaped {
+                value.push(match character {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => ' ',
+                    other => other,
+                });
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote as char {
+                return Some(sanitise(&value));
+            } else {
+                value.push(character);
+            }
+        }
+        return None;
+    }
+    None
 }
 
 pub fn has_malformed_call_id(record: &Value) -> bool {
@@ -651,12 +1094,17 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_owned();
+                agent.agent_list_calls.remove(&call_id);
+                if let Some(scope) = parse_agent_list_scope_or_none(payload) {
+                    agent.agent_list_calls.insert(call_id.clone(), scope);
+                }
+                let summary = summary_for_call(payload);
                 let interaction_sequence =
-                    agent.start_tool_interaction(&tool_name, timestamp, ordinal);
+                    agent.start_tool_interaction(&summary, timestamp, ordinal);
                 agent.in_flight_calls.insert(
                     call_id,
                     InFlightCall {
-                        summary: summary_for_call(payload),
+                        summary,
                         tool_name,
                         started_at: timestamp,
                         ordinal,
@@ -669,7 +1117,27 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
             }
             Some("custom_tool_call_output") | Some("function_call_output") => {
                 let id = payload["call_id"].as_str().expect("validated call_id");
+                let agent_list_scope = agent.agent_list_calls.remove(id);
                 if let Some(call) = agent.in_flight_calls.remove(id) {
+                    if call.tool_name == "list_agents" {
+                        if let (Some(scope), Some(observed_at), Some(agent_paths)) = (
+                            agent_list_scope,
+                            timestamp,
+                            parse_agent_list_paths_or_none(payload),
+                        ) {
+                            agent.record_agent_list_snapshot(scope, observed_at, agent_paths);
+                        }
+                    }
+                    if call.tool_name == "spawn_agent" {
+                        if let (Some(observed_at), Some(agent_path)) =
+                            (timestamp, parse_spawned_agent_path_or_none(payload))
+                        {
+                            agent.record_spawned_agent_hint(SpawnedAgentHint {
+                                agent_path,
+                                observed_at,
+                            });
+                        }
+                    }
                     agent.finish_tool_interaction(call, timestamp, ToolInteractionState::Returned);
                 }
                 agent.last_activity_at = timestamp;
@@ -742,6 +1210,41 @@ mod tests {
     }
     fn agent() -> AgentState {
         AgentState::new("t".into(), "0.149.0".into())
+    }
+
+    fn record_agent_list_snapshot(
+        agent: &mut AgentState,
+        id: &str,
+        arguments: &str,
+        output: &str,
+        call_at: i64,
+        output_at: i64,
+    ) {
+        assert!(reduce(
+            agent,
+            &serde_json::json!({
+                "timestamp": call_at,
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": "list_agents",
+                    "arguments": arguments
+                }
+            }),
+        ));
+        assert!(reduce(
+            agent,
+            &serde_json::json!({
+                "timestamp": output_at,
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": id,
+                    "output": output
+                }
+            }),
+        ));
     }
     #[test]
     fn lifecycle_reactivation_and_final_preference() {
@@ -834,6 +1337,128 @@ mod tests {
             DateTime::parse_from_rfc3339("2024-01-01T00:00:02Z")
                 .ok()
                 .map(|time| time.with_timezone(&Utc))
+        );
+    }
+
+    #[test]
+    fn list_agents_snapshots_are_complete_later_bounded_and_private() {
+        let mut observer = agent();
+        observer.agent_path = Some("/root".into());
+        record_agent_list_snapshot(
+            &mut observer,
+            "full",
+            "{}",
+            r#"{"agents":[{"agent_name":"/root","agent_status":"secret-status"}]}"#,
+            10,
+            11,
+        );
+        assert_eq!(observer.agent_list_snapshots.len(), 1);
+        assert!(!format!("{observer:?}").contains("secret-status"));
+
+        let mut target = AgentState::new("old".into(), "0.149.0".into());
+        target.parent_thread_id = Some("root".into());
+        target.agent_path = Some("/root/old".into());
+        target.latest_turn.status = TurnStatus::Running;
+        target.last_activity_at = DateTime::from_timestamp(10, 0);
+
+        let mut session = SessionState::default();
+        session.agents.insert("root".into(), observer);
+        session.agents.insert("old".into(), target);
+        assert_eq!(
+            session.stale_evidence(&session.agents["old"]),
+            Some(StaleEvidence::LaterAgentListSnapshot)
+        );
+
+        session.agents.get_mut("old").unwrap().last_activity_at = DateTime::from_timestamp(12, 0);
+        assert_eq!(session.stale_evidence(&session.agents["old"]), None);
+
+        let mut scoped = agent();
+        record_agent_list_snapshot(
+            &mut scoped,
+            "scoped",
+            r#"{"path_prefix":"/root/old"}"#,
+            r#"{"agents":[]}"#,
+            20,
+            21,
+        );
+        let mut target = session.agents.remove("old").unwrap();
+        target.last_activity_at = DateTime::from_timestamp(20, 0);
+        let mut scoped_session = SessionState::default();
+        scoped_session.agents.insert("observer".into(), scoped);
+        scoped_session.agents.insert("old".into(), target);
+        assert_eq!(
+            scoped_session.stale_evidence(&scoped_session.agents["old"]),
+            Some(StaleEvidence::LaterAgentListSnapshot)
+        );
+
+        let mut unrelated = agent();
+        record_agent_list_snapshot(
+            &mut unrelated,
+            "unrelated",
+            r#"{"path_prefix":"/root/other"}"#,
+            r#"{"agents":[]}"#,
+            20,
+            21,
+        );
+        let mut unrelated_session = SessionState::default();
+        unrelated_session
+            .agents
+            .insert("observer".into(), unrelated);
+        unrelated_session
+            .agents
+            .insert("old".into(), scoped_session.agents.remove("old").unwrap());
+        assert_eq!(
+            unrelated_session.stale_evidence(&unrelated_session.agents["old"]),
+            None
+        );
+
+        let exact_prefix = AgentListScope::PathPrefix("/root/foo".into());
+        assert!(exact_prefix.covers("/root/foo"));
+        assert!(exact_prefix.covers("/root/foo/child"));
+        assert!(!exact_prefix.covers("/root/foobar"));
+
+        let mut malformed = agent();
+        record_agent_list_snapshot(&mut malformed, "bad", "{}", "not json", 30, 31);
+        assert!(malformed.agent_list_snapshots.is_empty());
+        record_agent_list_snapshot(
+            &mut malformed,
+            "partial",
+            "{}",
+            r#"{"agents":[{"agent_status":"running"}]}"#,
+            32,
+            33,
+        );
+        assert!(malformed.agent_list_snapshots.is_empty());
+
+        let oversized_agents = (0..=AGENT_LIST_MEMBER_LIMIT)
+            .map(|_| {
+                serde_json::json!({
+                    "agent_name": "/root/member",
+                    "agent_status": "running"
+                })
+            })
+            .collect::<Vec<_>>();
+        let oversized_output = serde_json::json!({"agents": oversized_agents}).to_string();
+        record_agent_list_snapshot(&mut malformed, "oversized", "{}", &oversized_output, 34, 35);
+        assert!(malformed.agent_list_snapshots.is_empty());
+
+        for index in 0..=AGENT_LIST_SNAPSHOT_LIMIT {
+            record_agent_list_snapshot(
+                &mut malformed,
+                &format!("bounded-{index}"),
+                "{}",
+                r#"{"agents":[{"agent_name":"/root","agent_status":"running"}]}"#,
+                100 + index as i64 * 2,
+                101 + index as i64 * 2,
+            );
+        }
+        assert_eq!(
+            malformed.agent_list_snapshots.len(),
+            AGENT_LIST_SNAPSHOT_LIMIT
+        );
+        assert_eq!(
+            malformed.agent_list_snapshots.front().unwrap().observed_at,
+            DateTime::from_timestamp(103, 0).unwrap()
         );
     }
     #[test]
@@ -945,7 +1570,8 @@ mod tests {
         assert!(!value.contains('\n'));
         assert!(!value.contains('\t'));
         assert!(!value.chars().any(char::is_control));
-        assert!(value.starts_with("metadata��session�"));
+        assert!(value.starts_with("metadata↩�session�"));
+        assert_eq!(sanitise("a\nb\r\nc\rd"), "a↩b↩c↩d");
         assert!(value.ends_with('…'));
         assert_eq!(sanitise("short"), "short");
         let mut health = DataHealth::default();
@@ -977,7 +1603,58 @@ mod tests {
         }
     }
     #[test]
-    fn malformed_call_ids_and_exec_privacy() {
+    fn spawn_outputs_create_bounded_discovery_hints() {
+        let mut state = agent();
+        for index in 0..=SPAWN_HINT_LIMIT {
+            let call_id = format!("spawn-{index}");
+            assert!(reduce(
+                &mut state,
+                &serde_json::json!({
+                    "timestamp": index as i64,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "spawn_agent",
+                        "call_id": call_id,
+                        "arguments": "{}"
+                    }
+                }),
+            ));
+            assert!(reduce(
+                &mut state,
+                &serde_json::json!({
+                    "timestamp": index as i64 + 1,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": serde_json::json!({
+                            "task_name": format!("/root/child-{index}"),
+                            "message": "not retained"
+                        }).to_string()
+                    }
+                }),
+            ));
+        }
+
+        let hints = SessionState {
+            agents: [(state.thread_id.clone(), state)].into(),
+            ..SessionState::default()
+        }
+        .take_spawned_agent_hints();
+        assert_eq!(hints.len(), SPAWN_HINT_LIMIT);
+        assert_eq!(hints.first().unwrap().agent_path, "/root/child-1");
+        assert_eq!(
+            hints.last().unwrap().agent_path,
+            format!("/root/child-{SPAWN_HINT_LIMIT}")
+        );
+        assert!(hints
+            .iter()
+            .all(|hint| !hint.agent_path.contains("retained")));
+    }
+
+    #[test]
+    fn malformed_call_ids_and_bounded_tool_summaries() {
         let missing = r(
             r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"secret-token"}}"#,
         );
@@ -986,25 +1663,77 @@ mod tests {
         );
         assert!(has_malformed_call_id(&missing));
         assert!(has_malformed_call_id(&invalid));
-        let valid = r(
-            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"c","name":"exec","input":"secret-token"}}"#,
-        );
+
+        let valid = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "c",
+                "name": "exec",
+                "input": r#"const [one, two, three] = await Promise.all([
+                    tools.mcp__tilth__tilth_search({query:"AgentInteraction"}),
+                    tools.mcp__tilth__tilth_search({query:"reduce"}),
+                    tools.mcp__tilth__tilth_read({path:"src/model.rs"})
+                ]);"#
+            }
+        });
         assert!(!has_malformed_call_id(&valid));
         let mut state = agent();
         assert!(reduce(&mut state, &valid));
-        assert_eq!(state.in_flight_calls["c"].summary, "running exec");
-        assert!(!state.in_flight_calls["c"].summary.contains("secret"));
-        assert_eq!(state.interactions.back().unwrap().summary, "exec");
         assert_eq!(
-            state.interactions.back().unwrap().tool_state,
-            Some(ToolInteractionState::Open)
+            state.in_flight_calls["c"].summary,
+            "Tilth search · 2 calls; Tilth read"
         );
-        assert!(!state
-            .interactions
-            .back()
-            .unwrap()
-            .summary
-            .contains("secret"));
+        assert_eq!(
+            state.interactions.back().unwrap().summary,
+            "Tilth search · 2 calls; Tilth read"
+        );
+
+        let detailed = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "d",
+                "name": "exec",
+                "input": r#"const result = await tools.mcp__tilth__tilth_search({
+                    query:"agentop|list_agents|stale"
+                });"#
+            }
+        });
+        assert!(reduce(&mut state, &detailed));
+        assert_eq!(
+            state.interactions.back().unwrap().summary,
+            "Tilth search — agentop|list_agents|stale"
+        );
+
+        let command = serde_json::json!({
+            "name": "exec",
+            "input": r#"const result = await tools.exec_command({
+                cmd:"cargo test --all-targets\ncargo test"
+            });"#
+        });
+        assert_eq!(
+            summary_for_call(&command),
+            "Command — cargo test --all-targets↩cargo test"
+        );
+
+        let direct = serde_json::json!({
+            "name": "send_message",
+            "arguments": r#"{"target":"/root/reviewer","message":"private body"}"#
+        });
+        assert_eq!(summary_for_call(&direct), "Send message — /root/reviewer");
+        assert!(!summary_for_call(&direct).contains("private body"));
+
+        let long_query = format!(
+            r#"const result = await tools.mcp__tilth__tilth_search({{query:"{}"}});"#,
+            "x".repeat(TEXT_LIMIT * 2)
+        );
+        let bounded = summary_for_call(&serde_json::json!({
+            "name": "exec",
+            "input": long_query
+        }));
+        assert!(bounded.len() <= TEXT_LIMIT);
+        assert!(bounded.ends_with('…'));
     }
     #[test]
     fn exact_wait_agent_tracks_only_newest_running_call() {

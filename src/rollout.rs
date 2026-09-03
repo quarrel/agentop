@@ -11,7 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use walkdir::WalkDir;
+use walkdir::{IntoIter, WalkDir};
 
 pub const MAX_RECORD_SIZE: usize = 1024 * 1024;
 pub const APPEND_BUDGET: usize = 256 * 1024;
@@ -19,6 +19,13 @@ const INITIAL_LOAD_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 const POLL_WORK_BUDGET: usize = 2048;
 const INITIAL_LOAD_WORK_BUDGET: usize = 65_536;
 const READ_SLICE: usize = 1024 * 1024;
+const DIRECTORY_ENTRY_BUDGET: usize = 1024;
+
+type DiscoveryScan = IntoIter;
+
+fn discovery_scan(root: &Path) -> DiscoveryScan {
+    WalkDir::new(root).follow_links(false).into_iter()
+}
 
 #[derive(Debug, Clone)]
 pub struct RolloutMetadata {
@@ -188,7 +195,7 @@ pub fn discover(sessions_dir: &Path) -> Result<Discovery> {
         );
     }
     let mut out = Discovery::default();
-    for entry in WalkDir::new(sessions_dir).follow_links(false) {
+    for entry in discovery_scan(sessions_dir) {
         let entry = entry.with_context(|| format!("traverse {}", sessions_dir.display()))?;
         let p = entry.path();
         if !entry.file_type().is_file()
@@ -646,6 +653,11 @@ struct InitialLoad {
     target_offset: u64,
 }
 
+struct HintedDiscovery {
+    root: PathBuf,
+    scan: DiscoveryScan,
+}
+
 pub struct SelectedReader {
     pub group: SessionGroup,
     pub state: SessionState,
@@ -655,7 +667,8 @@ pub struct SelectedReader {
     pending_cursors: HashMap<PathBuf, RolloutCursor>,
     known_paths: HashSet<PathBuf>,
     sessions_root: PathBuf,
-    discovery_scan: walkdir::IntoIter,
+    discovery_scan: DiscoveryScan,
+    hinted_discovery: VecDeque<HintedDiscovery>,
     catalogue_dir: PathBuf,
     cursor_next: usize,
     pending_next: usize,
@@ -738,7 +751,7 @@ impl SelectedReader {
             .map(|meta| meta.path.clone())
             .chain(pending.iter().cloned())
             .collect();
-        let discovery_scan = WalkDir::new(&sessions_root).follow_links(false).into_iter();
+        let discovery_scan = discovery_scan(&sessions_root);
         Ok(Self {
             group,
             state,
@@ -749,17 +762,58 @@ impl SelectedReader {
             known_paths,
             sessions_root,
             discovery_scan,
+            hinted_discovery: VecDeque::new(),
             catalogue_dir,
             cursor_next: 0,
             pending_next: 0,
         })
     }
 
+    fn queue_spawn_discovery_hints(&mut self) {
+        for hint in self.state.take_spawned_agent_hints() {
+            if self
+                .state
+                .agents
+                .values()
+                .any(|agent| agent.agent_path.as_deref() == Some(hint.agent_path.as_str()))
+            {
+                continue;
+            }
+            let root = self
+                .sessions_root
+                .join(hint.observed_at.format("%Y/%m/%d").to_string());
+            if root.is_dir()
+                && !self
+                    .hinted_discovery
+                    .iter()
+                    .any(|queued| queued.root == root)
+            {
+                self.hinted_discovery.push_back(HintedDiscovery {
+                    scan: discovery_scan(&root),
+                    root,
+                });
+            }
+        }
+    }
+
+    fn queue_discovered_rollout(&mut self, path: &Path) {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+            && self.known_paths.insert(path.to_owned())
+        {
+            let path = path.to_owned();
+            self.pending_cursors
+                .insert(path.clone(), RolloutCursor::from_path_start(path.clone()));
+            self.pending.push(path);
+        }
+    }
     pub fn is_loading(&self) -> bool {
         !self.initial_load.is_empty()
     }
     pub fn poll(&mut self) -> Result<PollOutcome> {
-        const DIRECTORY_ENTRY_BUDGET: usize = 1024;
+        self.queue_spawn_discovery_hints();
         let loading_at_start = !self.initial_load.is_empty();
         let (mut remaining_bytes, mut remaining_work) = if loading_at_start {
             (
@@ -886,32 +940,49 @@ impl SelectedReader {
         } else {
             DIRECTORY_ENTRY_BUDGET
         };
-        for _ in 0..directory_entry_budget {
+        let mut discovery_entries = 0;
+        while discovery_entries < directory_entry_budget
+            && remaining_bytes > 0
+            && remaining_work > 0
+            && !self.hinted_discovery.is_empty()
+        {
+            let next = self
+                .hinted_discovery
+                .front_mut()
+                .expect("hinted discovery exists")
+                .scan
+                .next();
+            let Some(entry) = next else {
+                self.hinted_discovery.pop_front();
+                continue;
+            };
+            remaining_bytes -= 1;
+            remaining_work -= 1;
+            discovery_entries += 1;
+            let root = &self
+                .hinted_discovery
+                .front()
+                .expect("hinted discovery exists")
+                .root;
+            let entry = entry.with_context(|| format!("traverse {}", root.display()))?;
+            if entry.file_type().is_file() {
+                self.queue_discovered_rollout(entry.path());
+            }
+        }
+        for _ in discovery_entries..directory_entry_budget {
             if remaining_bytes == 0 || remaining_work == 0 {
                 break;
             }
             remaining_bytes -= 1;
             remaining_work -= 1;
             let Some(entry) = self.discovery_scan.next() else {
-                self.discovery_scan = WalkDir::new(&self.sessions_root)
-                    .follow_links(false)
-                    .into_iter();
+                self.discovery_scan = discovery_scan(&self.sessions_root);
                 break;
             };
             let entry =
                 entry.with_context(|| format!("traverse {}", self.sessions_root.display()))?;
-            let path = entry.path();
-            if entry.file_type().is_file()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
-                && self.known_paths.insert(path.to_owned())
-            {
-                let path = path.to_owned();
-                self.pending_cursors
-                    .insert(path.clone(), RolloutCursor::from_path_start(path.clone()));
-                self.pending.push(path);
+            if entry.file_type().is_file() {
+                self.queue_discovered_rollout(entry.path());
             }
         }
 
@@ -1676,6 +1747,86 @@ mod tests {
             reader.state.agents["s"].latest_turn.status,
             crate::model::TurnStatus::Running
         );
+    }
+
+    #[test]
+    fn spawn_output_prioritises_live_child_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let date_dir = temp.path().join("2026/09/03");
+        std::fs::create_dir_all(&date_dir).unwrap();
+        let root = date_dir.join("rollout-root.jsonl");
+        std::fs::write(&root, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"s\",\"cli_version\":\"0.149.0-alpha.4.1\"}}\n").unwrap();
+
+        let discovery = discover(temp.path()).unwrap();
+        let group = group(discovery.admitted).pop().unwrap();
+        let mut reader = SelectedReader::new(
+            group,
+            discovery.pending,
+            temp.path().to_owned(),
+            temp.path().to_owned(),
+        )
+        .unwrap();
+        finish_initial_load(&mut reader);
+
+        let noise = temp.path().join("noise");
+        std::fs::create_dir_all(&noise).unwrap();
+        for index in 0..DIRECTORY_ENTRY_BUDGET * 2 {
+            std::fs::write(noise.join(format!("payload-{index}.json")), "{}").unwrap();
+        }
+        reader.discovery_scan = discovery_scan(&noise);
+
+        let child = date_dir.join("rollout-child.jsonl");
+        std::fs::write(&child, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"child\",\"parent_thread_id\":\"s\",\"agent_path\":\"/root/child\",\"cli_version\":\"0.149.0-alpha.4.1\"}}\n").unwrap();
+        let mut root_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&root)
+            .unwrap();
+        writeln!(
+            root_file,
+            "{}",
+            serde_json::json!({
+                "timestamp": "2026-09-03T13:41:58Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "call_id": "spawn",
+                    "arguments": "{}"
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            root_file,
+            "{}",
+            serde_json::json!({
+                "timestamp": "2026-09-03T13:41:59Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "spawn",
+                    "output": "{\"task_name\":\"/root/child\"}"
+                }
+            })
+        )
+        .unwrap();
+
+        assert_eq!(
+            reader.poll().unwrap(),
+            PollOutcome::Updated {
+                records: 2,
+                admitted: 0
+            }
+        );
+        assert!(!reader.state.agents.contains_key("child"));
+        assert_eq!(
+            reader.poll().unwrap(),
+            PollOutcome::Updated {
+                records: 0,
+                admitted: 1
+            }
+        );
+        assert!(reader.state.agents.contains_key("child"));
     }
     #[test]
     fn selector_prefix_and_post_start_discovery_with_diagnostics() {
