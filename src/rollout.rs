@@ -457,14 +457,17 @@ fn ingest_value(
     });
 }
 
-fn agent_from_meta(meta: &RolloutMetadata, repo_root: &Path) -> Result<crate::model::AgentState> {
+fn agent_from_meta(
+    meta: &RolloutMetadata,
+    catalogue_dir: &Path,
+) -> Result<crate::model::AgentState> {
     let mut agent = crate::model::AgentState::new(meta.thread_id.clone(), meta.cli_version.clone());
     agent.parent_thread_id = meta.parent_thread_id.clone();
     agent.agent_path = meta.agent_path.as_deref().map(sanitise);
     agent.agent_role = meta.agent_role.as_deref().map(sanitise);
     agent.agent_nickname = meta.agent_nickname.as_deref().map(sanitise);
     agent.own_history_start_ordinal = meta.history_start;
-    match lookup(repo_root, &meta.cli_version)? {
+    match lookup(catalogue_dir, &meta.cli_version)? {
         SchemaStatus::Catalogued {
             rollout_line_canonical_sha256,
             ..
@@ -488,7 +491,7 @@ fn agent_from_meta(meta: &RolloutMetadata, repo_root: &Path) -> Result<crate::mo
 
 pub fn load_group(
     group: &SessionGroup,
-    repo_root: &Path,
+    catalogue_dir: &Path,
 ) -> Result<(SessionState, Vec<RolloutCursor>)> {
     let root = &group.rollouts[group.root];
     let mut state = SessionState {
@@ -499,7 +502,7 @@ pub fn load_group(
     };
     let mut cursors = Vec::new();
     for meta in &group.rollouts {
-        let mut agent = agent_from_meta(meta, repo_root)?;
+        let mut agent = agent_from_meta(meta, catalogue_dir)?;
         let boundary = meta.history_start;
         let mut crossed = boundary.is_none();
         let mut cursor = RolloutCursor::new(meta);
@@ -653,7 +656,7 @@ pub struct SelectedReader {
     known_paths: HashSet<PathBuf>,
     sessions_root: PathBuf,
     discovery_scan: walkdir::IntoIter,
-    repo_root: PathBuf,
+    catalogue_dir: PathBuf,
     cursor_next: usize,
     pending_next: usize,
 }
@@ -662,7 +665,7 @@ impl SelectedReader {
         group: SessionGroup,
         pending: Vec<PathBuf>,
         sessions_root: PathBuf,
-        repo_root: PathBuf,
+        catalogue_dir: PathBuf,
     ) -> Result<Self> {
         let root = group.rollouts[group.root].clone();
         let mut state = SessionState {
@@ -671,9 +674,10 @@ impl SelectedReader {
             started_at: root.timestamp,
             ..Default::default()
         };
-        state
-            .agents
-            .insert(root.thread_id.clone(), agent_from_meta(&root, &repo_root)?);
+        state.agents.insert(
+            root.thread_id.clone(),
+            agent_from_meta(&root, &catalogue_dir)?,
+        );
 
         // Discovery has already bounded and parsed metadata. Sort it once, then make
         // stable parent-aware passes without reopening rollout content here.
@@ -745,7 +749,7 @@ impl SelectedReader {
             known_paths,
             sessions_root,
             discovery_scan,
-            repo_root,
+            catalogue_dir,
             cursor_next: 0,
             pending_next: 0,
         })
@@ -775,7 +779,7 @@ impl SelectedReader {
         {
             let load = self.initial_load.front_mut().expect("initial load exists");
             if !self.state.agents.contains_key(&load.meta.thread_id) {
-                let agent = agent_from_meta(&load.meta, &self.repo_root)?;
+                let agent = agent_from_meta(&load.meta, &self.catalogue_dir)?;
                 self.state.agents.insert(load.meta.thread_id.clone(), agent);
                 remaining_work -= 1;
                 if remaining_work == initial_work_floor {
@@ -863,7 +867,7 @@ impl SelectedReader {
             let processed = match outcome {
                 TailOutcome::Records(count) => count,
                 TailOutcome::RebuildRequired => {
-                    let (state, cursors) = load_group(&self.group, &self.repo_root)?;
+                    let (state, cursors) = load_group(&self.group, &self.catalogue_dir)?;
                     self.state = state;
                     self.cursors = cursors;
                     self.initial_load.clear();
@@ -1010,7 +1014,7 @@ impl SelectedReader {
             let processed = match outcome {
                 TailOutcome::Records(count) => count,
                 TailOutcome::RebuildRequired => {
-                    let (state, cursors) = load_group(&self.group, &self.repo_root)?;
+                    let (state, cursors) = load_group(&self.group, &self.catalogue_dir)?;
                     self.state = state;
                     self.cursors = cursors;
                     self.cursor_next = 0;
@@ -1131,7 +1135,7 @@ impl SelectedReader {
                 {
                     continue;
                 }
-                let agent = agent_from_meta(&meta, &self.repo_root)?;
+                let agent = agent_from_meta(&meta, &self.catalogue_dir)?;
                 self.state.agents.insert(meta.thread_id.clone(), agent);
                 self.cursors.push(RolloutCursor::new(&meta));
                 self.group.rollouts.push(meta);

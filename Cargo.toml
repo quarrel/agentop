@@ -8,9 +8,13 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
+fs2 = "0.4"
 ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-walkdir = "2"
-
-[dev-dependencies]
+sha2 = "0.10"
 tempfile = "3"
+walkdir = "2"
+zstd = "0.13"

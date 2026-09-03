@@ -1,4 +1,7 @@
-use crate::model::{AgentState, CoverageLevel, DataHealth, SessionState, TurnStatus};
+use crate::model::{
+    AgentInteraction, AgentState, CoverageLevel, DataHealth, InteractionKind, SessionState,
+    TurnStatus,
+};
 use crate::rollout::{self, Discovery, PollOutcome, SelectedReader, SessionGroup};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -82,6 +85,14 @@ impl Palette {
     fn role(self) -> Style {
         self.fg(Color::Blue)
     }
+    fn model(self) -> Style {
+        self.fg(Color::LightMagenta)
+    }
+
+    fn reasoning_effort(self) -> Style {
+        self.fg(Color::LightYellow)
+    }
+
     fn good(self) -> Style {
         self.fg(Color::Green)
     }
@@ -134,8 +145,16 @@ impl Drop for TerminalGuard {
 #[derive(Default)]
 struct UiState {
     selected_thread: Option<String>,
+    hide_completed: bool,
+    history: Option<HistoryState>,
     catching_up: bool,
     last_change: Option<Instant>,
+}
+
+struct HistoryState {
+    thread_id: String,
+    selected_sequence: Option<u64>,
+    follow_latest: bool,
 }
 
 #[derive(Default)]
@@ -239,6 +258,79 @@ impl UiState {
             .min(rows.len().saturating_sub(1));
         self.selected_thread = Some(rows[next].thread_id.clone());
     }
+
+    fn toggle_completed(&mut self) {
+        self.hide_completed = !self.hide_completed;
+    }
+
+    fn open_history(&mut self, state: &SessionState) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let selected_sequence = state
+            .agents
+            .get(&thread_id)
+            .and_then(|agent| agent.interactions.back())
+            .map(|interaction| interaction.sequence);
+        self.history = Some(HistoryState {
+            thread_id,
+            selected_sequence,
+            follow_latest: true,
+        });
+    }
+
+    fn close_history(&mut self) -> bool {
+        self.history.take().is_some()
+    }
+
+    fn synchronise_history(&mut self, state: &SessionState) {
+        let Some(history) = self.history.as_mut() else {
+            return;
+        };
+        let Some(agent) = state.agents.get(&history.thread_id) else {
+            self.history = None;
+            return;
+        };
+        if agent.interactions.is_empty() {
+            history.selected_sequence = None;
+        } else if history.follow_latest {
+            history.selected_sequence = agent
+                .interactions
+                .back()
+                .map(|interaction| interaction.sequence);
+        } else if !agent
+            .interactions
+            .iter()
+            .any(|interaction| Some(interaction.sequence) == history.selected_sequence)
+        {
+            history.selected_sequence = agent
+                .interactions
+                .front()
+                .map(|interaction| interaction.sequence);
+        }
+    }
+
+    fn move_history(&mut self, state: &SessionState, delta: isize) {
+        self.synchronise_history(state);
+        let Some(history) = self.history.as_mut() else {
+            return;
+        };
+        let Some(agent) = state.agents.get(&history.thread_id) else {
+            return;
+        };
+        let Some(current) = agent
+            .interactions
+            .iter()
+            .position(|interaction| Some(interaction.sequence) == history.selected_sequence)
+        else {
+            return;
+        };
+        let next = current
+            .saturating_add_signed(delta)
+            .min(agent.interactions.len().saturating_sub(1));
+        history.selected_sequence = Some(agent.interactions[next].sequence);
+        history.follow_latest = next + 1 == agent.interactions.len();
+    }
 }
 
 pub fn run(reader: &mut SelectedReader, color: ColorMode) -> Result<()> {
@@ -253,7 +345,7 @@ pub fn run(reader: &mut SelectedReader, color: ColorMode) -> Result<()> {
     result.and(cursor_result)
 }
 
-pub fn run_browser(sessions_dir: PathBuf, repo_root: PathBuf, color: ColorMode) -> Result<()> {
+pub fn run_browser(sessions_dir: PathBuf, catalogue_dir: PathBuf, color: ColorMode) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("initialise terminal")?;
@@ -261,7 +353,7 @@ pub fn run_browser(sessions_dir: PathBuf, repo_root: PathBuf, color: ColorMode) 
     let result = browser_loop(
         &mut terminal,
         &sessions_dir,
-        &repo_root,
+        &catalogue_dir,
         Palette::new(color),
     );
     let cursor_result = terminal.show_cursor().context("restore terminal cursor");
@@ -277,8 +369,9 @@ fn event_loop(
     let mut dirty = true;
     let mut last_update_started = Instant::now();
     loop {
-        let rows = flatten(&reader.group, &reader.state);
+        let rows = flatten(&reader.group, &reader.state, ui.hide_completed);
         ui.synchronise(&rows);
+        ui.synchronise_history(&reader.state);
         if dirty {
             let loading = reader.is_loading();
             terminal
@@ -304,19 +397,43 @@ fn event_loop(
             match event::read().context("read terminal event")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') => return Ok(TreeExit::Quit),
-                    KeyCode::Esc => return Ok(TreeExit::Back),
+                    KeyCode::Esc => {
+                        if ui.close_history() {
+                            dirty = true;
+                        } else {
+                            return Ok(TreeExit::Back);
+                        }
+                    }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        ui.move_selection(&rows, -1);
+                        if ui.history.is_some() {
+                            ui.move_history(&reader.state, -1);
+                        } else {
+                            ui.move_selection(&rows, -1);
+                        }
                         dirty = true;
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        ui.move_selection(&rows, 1);
+                        if ui.history.is_some() {
+                            ui.move_history(&reader.state, 1);
+                        } else {
+                            ui.move_selection(&rows, 1);
+                        }
                         dirty = true;
+                    }
+                    KeyCode::Enter => {
+                        if ui.history.is_none() {
+                            ui.open_history(&reader.state);
+                            dirty = true;
+                        }
                     }
                     KeyCode::Char('r') => {
                         last_update_started = Instant::now();
                         let outcome = reader.poll().context("rescan selected session")?;
                         note_poll(&mut ui, outcome);
+                        dirty = true;
+                    }
+                    KeyCode::Char('h') if ui.history.is_none() => {
+                        ui.toggle_completed();
                         dirty = true;
                     }
                     _ => {}
@@ -352,7 +469,7 @@ fn event_loop(
 fn browser_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     sessions_dir: &Path,
-    repo_root: &Path,
+    catalogue_dir: &Path,
     palette: Palette,
 ) -> Result<()> {
     let mut picker = PickerState::default();
@@ -381,7 +498,7 @@ fn browser_loop(
                     selected,
                     pending,
                     sessions_dir.to_owned(),
-                    repo_root.to_owned(),
+                    catalogue_dir.to_owned(),
                 )?;
                 match BrowserMode::after_tree(event_loop(terminal, &mut reader, palette)?) {
                     BrowserMode::Exit => return Ok(()),
@@ -463,6 +580,18 @@ fn project_label(group: &SessionGroup) -> String {
         .map(|name| render_text(&name.to_string_lossy()))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "(unknown project)".into())
+}
+
+fn agent_label(agent: &AgentState) -> &str {
+    if agent.parent_thread_id.is_none() {
+        return agent.agent_nickname.as_deref().unwrap_or(&agent.thread_id);
+    }
+    agent
+        .agent_path
+        .as_deref()
+        .and_then(|path| path.rsplit('/').find(|segment| !segment.is_empty()))
+        .or(agent.agent_nickname.as_deref())
+        .unwrap_or(&agent.thread_id)
 }
 
 fn draw_picker(
@@ -579,19 +708,13 @@ fn draw_picker(
         chunks[3],
     );
 }
-fn flatten(group: &SessionGroup, state: &SessionState) -> Vec<TreeRow> {
+fn flatten(group: &SessionGroup, state: &SessionState, hide_completed: bool) -> Vec<TreeRow> {
     fn local_activity(agent: &AgentState) -> Option<DateTime<Utc>> {
         agent.last_activity_at.or(agent.latest_turn.started_at)
     }
 
     fn label(id: &str, state: &SessionState) -> String {
-        let agent = &state.agents[id];
-        agent
-            .agent_path
-            .as_deref()
-            .or(agent.agent_nickname.as_deref())
-            .unwrap_or(id)
-            .to_owned()
+        agent_label(&state.agents[id]).to_owned()
     }
 
     fn subtree_activity(
@@ -625,19 +748,32 @@ fn flatten(group: &SessionGroup, state: &SessionState) -> Vec<TreeRow> {
         depth: usize,
         children: &HashMap<String, Vec<String>>,
         state: &SessionState,
+        hide_completed: bool,
         seen: &mut HashSet<String>,
         rows: &mut Vec<TreeRow>,
     ) {
         if !seen.insert(id.to_owned()) || !state.agents.contains_key(id) {
             return;
         }
-        rows.push(TreeRow {
-            thread_id: id.to_owned(),
-            depth,
-        });
+        let hidden = hide_completed && state.agents[id].latest_turn.status == TurnStatus::Completed;
+        if !hidden {
+            rows.push(TreeRow {
+                thread_id: id.to_owned(),
+                depth,
+            });
+        }
+        let child_depth = if hidden { depth } else { depth + 1 };
         if let Some(ids) = children.get(id) {
             for child in ids {
-                visit(child, depth + 1, children, state, seen, rows);
+                visit(
+                    child,
+                    child_depth,
+                    children,
+                    state,
+                    hide_completed,
+                    seen,
+                    rows,
+                );
             }
         }
     }
@@ -674,7 +810,15 @@ fn flatten(group: &SessionGroup, state: &SessionState) -> Vec<TreeRow> {
 
     let root = &group.rollouts[group.root].thread_id;
     let mut rows = Vec::new();
-    visit(root, 0, &children, state, &mut HashSet::new(), &mut rows);
+    visit(
+        root,
+        0,
+        &children,
+        state,
+        hide_completed,
+        &mut HashSet::new(),
+        &mut rows,
+    );
     rows
 }
 
@@ -690,7 +834,7 @@ fn draw(
     let area = frame.area();
     if area.width < 30 || area.height < 8 {
         frame.render_widget(
-            Paragraph::new("agentop\nterminal too small\nq / Esc: quit")
+            Paragraph::new("agentop\nterminal too small\nq quit · Esc back")
                 .style(palette.warning())
                 .block(
                     Block::default()
@@ -700,6 +844,10 @@ fn draw(
                 .wrap(Wrap { trim: true }),
             area,
         );
+        return;
+    }
+    if let Some(history) = ui.history.as_ref() {
+        draw_history(frame, state, history, loading, ui.catching_up, palette);
         return;
     }
 
@@ -791,24 +939,188 @@ fn draw(
         chunks[2],
     );
     frame.render_widget(
-        Paragraph::new("↑/↓ or j/k select   r rescan   q/Esc quit"),
+        Paragraph::new(format!(
+            "↑/↓ or j/k select   Enter interactions   r rescan   h {} completed   Esc back   q quit",
+            if ui.hide_completed { "show" } else { "hide" }
+        )),
+        chunks[3],
+    );
+}
+
+fn interaction_kind(kind: InteractionKind) -> &'static str {
+    match kind {
+        InteractionKind::Lifecycle => "lifecycle",
+        InteractionKind::Tool => "tool",
+        InteractionKind::Reasoning => "reasoning",
+        InteractionKind::Message => "message",
+        InteractionKind::Communication => "communication",
+    }
+}
+
+fn interaction_style(kind: InteractionKind, palette: Palette) -> Style {
+    match kind {
+        InteractionKind::Lifecycle => palette.title(),
+        InteractionKind::Tool => palette.warning(),
+        InteractionKind::Reasoning => palette.model(),
+        InteractionKind::Message => palette.good(),
+        InteractionKind::Communication => palette.role(),
+    }
+}
+
+fn interaction_line(interaction: &AgentInteraction, palette: Palette) -> Line<'static> {
+    let mut spans = Vec::new();
+    if let Some(timestamp) = interaction.timestamp {
+        spans.push(Span::styled(
+            format!("{}  ", timestamp.to_rfc3339()),
+            palette.metadata(),
+        ));
+    } else if let Some(ordinal) = interaction.ordinal {
+        spans.push(Span::styled(
+            format!("ordinal {ordinal}  "),
+            palette.metadata(),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("{}: ", interaction_kind(interaction.kind)),
+        interaction_style(interaction.kind, palette),
+    ));
+    spans.push(Span::raw(render_text(&interaction.summary)));
+    Line::from(spans)
+}
+
+fn interaction_detail_lines(
+    interaction: Option<(&AgentInteraction, usize)>,
+    total: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let Some((interaction, index)) = interaction else {
+        return vec![Line::from("No interactions retained for this agent")];
+    };
+    let mut lines = vec![
+        labelled_line("position", format!("{}/{}", index + 1, total), palette),
+        labelled_line("type", interaction_kind(interaction.kind).into(), palette),
+    ];
+    if let Some(timestamp) = interaction.timestamp {
+        lines.push(labelled_line("timestamp", timestamp.to_rfc3339(), palette));
+    }
+    if let Some(ordinal) = interaction.ordinal {
+        lines.push(labelled_line("ordinal", ordinal.to_string(), palette));
+    }
+    lines.push(labelled_line(
+        "content",
+        render_text(&interaction.summary),
+        palette,
+    ));
+    lines
+}
+
+fn draw_history(
+    frame: &mut Frame,
+    state: &SessionState,
+    history: &HistoryState,
+    loading: bool,
+    catching_up: bool,
+    palette: Palette,
+) {
+    let area = frame.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Percentage(55),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let agent = state
+        .agents
+        .get(&history.thread_id)
+        .expect("history view references a selected agent");
+    let progress = if loading {
+        " · loading history…"
+    } else if catching_up {
+        " · catching up…"
+    } else {
+        ""
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "agentop · interactions · {} · {} retained{}",
+            render_text(agent_label(agent)),
+            agent.interactions.len(),
+            progress,
+        ))
+        .style(if loading || catching_up {
+            palette.warning()
+        } else {
+            palette.title()
+        })
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(palette.title()),
+        ),
+        chunks[0],
+    );
+
+    let items = agent
+        .interactions
+        .iter()
+        .map(|interaction| ListItem::new(interaction_line(interaction, palette)))
+        .collect::<Vec<_>>();
+    let selected_index = history.selected_sequence.and_then(|sequence| {
+        agent
+            .interactions
+            .iter()
+            .position(|interaction| interaction.sequence == sequence)
+    });
+    let mut list_state = ListState::default();
+    list_state.select(selected_index);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::default()
+                    .title(" interactions · oldest → newest ")
+                    .title_style(palette.title())
+                    .borders(Borders::ALL)
+                    .border_style(palette.title()),
+            )
+            .highlight_style(palette.selection())
+            .highlight_symbol("› "),
+        chunks[1],
+        &mut list_state,
+    );
+
+    let selected = selected_index.and_then(|index| {
+        agent
+            .interactions
+            .get(index)
+            .map(|interaction| (interaction, index))
+    });
+    frame.render_widget(
+        Paragraph::new(interaction_detail_lines(
+            selected,
+            agent.interactions.len(),
+            palette,
+        ))
+        .block(
+            Block::default()
+                .title(" selected interaction ")
+                .title_style(palette.title())
+                .borders(Borders::ALL)
+                .border_style(palette.title()),
+        )
+        .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new("↑/k older   ↓/j newer   r rescan   Esc back   q quit"),
         chunks[3],
     );
 }
 
 fn tree_line(row: &TreeRow, agent: &AgentState, palette: Palette) -> Line<'static> {
-    let label = render_text(
-        agent
-            .agent_path
-            .as_deref()
-            .or(agent.agent_nickname.as_deref())
-            .unwrap_or(&agent.thread_id),
-    );
-    let role = render_text(agent.agent_role.as_deref().unwrap_or(if row.depth == 0 {
-        "orchestrator"
-    } else {
-        "unknown role"
-    }));
+    let label = render_text(agent_label(agent));
     let status = lifecycle_status(agent);
     let status_style = match agent.latest_turn.status {
         TurnStatus::Completed => palette.good(),
@@ -816,139 +1128,188 @@ fn tree_line(row: &TreeRow, agent: &AgentState, palette: Palette) -> Line<'stati
         TurnStatus::Pending => palette.warning(),
         TurnStatus::Running => palette.title(),
     };
-    let age = agent
-        .last_activity_at
-        .map_or_else(|| "no activity".into(), age);
+    let branch = agent.parent_thread_id.as_ref().map_or("", |_| "↪ ");
+    let mut spans = vec![Span::raw(format!(
+        "{}{branch}{label}  ",
+        "  ".repeat(row.depth)
+    ))];
+    if let Some(role) = agent
+        .agent_role
+        .as_deref()
+        .or_else(|| agent.parent_thread_id.is_none().then_some("orchestrator"))
+    {
+        spans.push(Span::styled(
+            format!("{}  ", render_text(role)),
+            palette.role(),
+        ));
+    }
+    if let Some(model) = agent.model.as_deref() {
+        spans.push(Span::styled(
+            format!("{}  ", render_text(model)),
+            palette.model(),
+        ));
+    }
+    if let Some(effort) = agent.reasoning_effort.as_deref() {
+        spans.push(Span::styled(
+            format!("{}  ", render_text(effort)),
+            palette.reasoning_effort(),
+        ));
+    }
+    spans.push(Span::styled(format!("{status}  "), status_style));
+    if let Some(last_activity) = agent.last_activity_at {
+        spans.push(Span::styled(age(last_activity), palette.metadata()));
+    }
+    Line::from(spans)
+}
+
+fn labelled_line(label: &str, value: String, palette: Palette) -> Line<'static> {
     Line::from(vec![
-        Span::raw(format!("{}{}  ", "  ".repeat(row.depth), label)),
-        Span::styled(format!("{role}  "), palette.role()),
-        Span::styled(format!("{status}  "), status_style),
-        Span::styled(age, palette.metadata()),
+        Span::styled(format!("{label}: "), palette.title()),
+        Span::raw(value),
     ])
 }
 
-fn detail_lines<'a>(
-    agent: Option<&'a AgentState>,
+fn push_detail_value(spans: &mut Vec<Span<'static>>, value: String, style: Style) {
+    if spans.len() > 1 {
+        spans.push(Span::raw(" · "));
+    }
+    spans.push(Span::styled(value, style));
+}
+
+fn detail_lines(
+    agent: Option<&AgentState>,
     state: &SessionState,
     group: &SessionGroup,
     palette: Palette,
-) -> Vec<Line<'a>> {
+) -> Vec<Line<'static>> {
     let Some(agent) = agent else {
         return vec![Line::from("No agent selected")];
     };
-    let health = &state.data_health;
     let metadata = group
         .rollouts
         .iter()
         .find(|metadata| metadata.thread_id == agent.thread_id);
-    let schema = if agent.schema_catalogued {
-        "catalogued"
-    } else {
-        "missing"
-    };
-    let health_style = if health.malformed_records > 0 || health.oversized_records > 0 {
-        palette.error()
-    } else if health.unknown_records > 0 || health.unknown_events > 0 {
-        palette.warning()
-    } else {
-        palette.good()
-    };
-    let schema_style = if agent.schema_catalogued {
-        palette.good()
-    } else {
-        palette.warning()
-    };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("agent: ", palette.title()),
-            Span::raw(format!(
-                "{} · thread {} · parent {}",
-                render_text(agent.agent_path.as_deref().unwrap_or("(unnamed)")),
-                render_text(&agent.thread_id),
-                render_text(agent.parent_thread_id.as_deref().unwrap_or("none"))
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("metadata: ", palette.metadata()),
-            Span::styled(
-                format!(
-                    "role {} · nickname {} · Codex {} · schema {} · compatibility {}",
-                    render_text(agent.agent_role.as_deref().unwrap_or("unknown")),
-                    render_text(agent.agent_nickname.as_deref().unwrap_or("unknown")),
-                    render_text(&agent.cli_version),
-                    schema,
-                    coverage(agent.coverage)
-                ),
-                schema_style,
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("lifecycle: ", palette.title()),
-            Span::raw(format!(
-                "{} · turn {} · depth {} · started {} · completed {} · last activity {}",
-                lifecycle_status(agent),
-                render_text(agent.latest_turn.turn_id.as_deref().unwrap_or("unknown")),
-                metadata
-                    .and_then(|metadata| metadata.depth)
-                    .map_or_else(|| "unknown".into(), |depth| depth.to_string()),
-                timestamp(agent.latest_turn.started_at),
-                timestamp(agent.latest_turn.completed_at),
-                timestamp(agent.last_activity_at)
-            )),
-        ]),
-        Line::from(format!(
-            "activity: {}{}",
-            render_text(agent.current_activity().unwrap_or("none")),
-            agent
-                .active_call_evidence()
-                .map(|(started, ordinal)| format!(
-                    " · active call started {} · ordinal {}",
-                    timestamp(started),
-                    ordinal.map_or_else(|| "unknown".into(), |value| value.to_string())
-                ))
-                .unwrap_or_default()
-        )),
-        Line::from(format!(
-            "reasoning: {}",
-            render_text(agent.last_reasoning_summary.as_deref().unwrap_or("none"))
-        )),
-        Line::from(format!(
-            "message: {}",
-            render_text(agent.last_message.as_deref().unwrap_or("none"))
-        )),
-        Line::from(format!(
-            "final: {}",
-            render_text(agent.final_message.as_deref().unwrap_or("none"))
-        )),
-        Line::from(format!(
-            "untrusted result claim: {}",
-            render_text(agent.result_status_claim.as_deref().unwrap_or("none"))
-        )),
-        Line::from(Span::styled(
-            format!(
-                "health: unknown records {} · unknown events {} · malformed {} · oversized {}",
-                health.unknown_records,
-                health.unknown_events,
-                health.malformed_records,
-                health.oversized_records
-            ),
-            health_style,
-        )),
-    ];
-    if let Some(diagnostic) = health.recent_diagnostics.back() {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "latest diagnostic: {}:{} ordinal {} · {} {}",
-                render_text(&diagnostic.rollout_path.display().to_string()),
-                diagnostic.byte_offset,
-                diagnostic
-                    .ordinal
-                    .map_or_else(|| "unknown".into(), |value| value.to_string()),
-                render_text(&diagnostic.kind),
-                render_text(diagnostic.detail.as_deref().unwrap_or(""))
-            ),
-            palette.warning(),
-        )));
+
+    let mut identity = format!(
+        "{} · thread {}",
+        render_text(agent.agent_path.as_deref().unwrap_or("(unnamed)")),
+        render_text(&agent.thread_id),
+    );
+    if let Some(parent) = agent.parent_thread_id.as_deref() {
+        identity.push_str(&format!(" · parent {}", render_text(parent)));
+    }
+    let mut lines = vec![labelled_line("agent", identity, palette)];
+
+    let mut metadata_spans = vec![Span::styled("metadata: ", palette.title())];
+    if let Some(role) = agent.agent_role.as_deref() {
+        push_detail_value(
+            &mut metadata_spans,
+            format!("role {}", render_text(role)),
+            Style::default(),
+        );
+    }
+    if let Some(nickname) = agent.agent_nickname.as_deref() {
+        push_detail_value(
+            &mut metadata_spans,
+            format!("nickname {}", render_text(nickname)),
+            Style::default(),
+        );
+    }
+    push_detail_value(
+        &mut metadata_spans,
+        format!("Codex {}", render_text(&agent.cli_version)),
+        Style::default(),
+    );
+    if !agent.schema_catalogued {
+        push_detail_value(
+            &mut metadata_spans,
+            "schema missing".into(),
+            palette.error(),
+        );
+    }
+    if agent.coverage == CoverageLevel::Unknown {
+        push_detail_value(
+            &mut metadata_spans,
+            format!("compatibility {}", coverage(agent.coverage)),
+            palette.error(),
+        );
+    }
+    lines.push(Line::from(metadata_spans));
+
+    let mut lifecycle = vec![lifecycle_status(agent).to_owned()];
+    if let Some(turn_id) = agent.latest_turn.turn_id.as_deref() {
+        lifecycle.push(format!("turn {}", render_text(turn_id)));
+    }
+    if let Some(depth) = metadata.and_then(|metadata| metadata.depth) {
+        lifecycle.push(format!("depth {depth}"));
+    }
+    if let Some(started_at) = agent.latest_turn.started_at {
+        lifecycle.push(format!("started {}", timestamp(Some(started_at))));
+    }
+    if let Some(completed_at) = agent.latest_turn.completed_at {
+        lifecycle.push(format!("completed {}", timestamp(Some(completed_at))));
+    }
+    if let Some(last_activity) = agent.last_activity_at {
+        lifecycle.push(format!("last activity {}", timestamp(Some(last_activity))));
+    }
+    lines.push(labelled_line("lifecycle", lifecycle.join(" · "), palette));
+
+    let message = agent.last_message.as_deref();
+    let final_message = agent.final_message.as_deref();
+    if let Some(activity) = agent
+        .current_activity()
+        .filter(|activity| agent.active_call_evidence().is_some() || message != Some(*activity))
+    {
+        let mut activity = render_text(activity);
+        if let Some((started, ordinal)) = agent.active_call_evidence() {
+            if let Some(started) = started {
+                activity.push_str(&format!(
+                    " · active call started {}",
+                    timestamp(Some(started))
+                ));
+            }
+            if let Some(ordinal) = ordinal {
+                activity.push_str(&format!(" · ordinal {ordinal}"));
+            }
+        }
+        lines.push(labelled_line("activity", activity, palette));
+    }
+    if let Some(summary) = agent.last_reasoning_summary.as_deref() {
+        lines.push(labelled_line(
+            "reasoning summary",
+            render_text(summary),
+            palette,
+        ));
+    }
+    if let Some(message) = message {
+        lines.push(labelled_line("message", render_text(message), palette));
+    }
+    if let Some(final_message) =
+        final_message.filter(|final_message| message != Some(*final_message))
+    {
+        lines.push(labelled_line("final", render_text(final_message), palette));
+    }
+    if let Some(claim) = agent.result_status_claim.as_deref() {
+        lines.push(labelled_line(
+            "untrusted result claim",
+            render_text(claim),
+            palette,
+        ));
+    }
+
+    let health = &state.data_health;
+    if health.malformed_records > 0 || health.oversized_records > 0 {
+        let mut issues = Vec::new();
+        if health.malformed_records > 0 {
+            issues.push(format!("malformed {}", health.malformed_records));
+        }
+        if health.oversized_records > 0 {
+            issues.push(format!("oversized {}", health.oversized_records));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("session health: ", palette.title()),
+            Span::styled(issues.join(" · "), palette.error()),
+        ]));
     }
     lines
 }
@@ -1129,7 +1490,7 @@ mod tests {
         let (group, mut state) = fixture();
         state.agents.remove("child");
         let mut ui = UiState::default();
-        let rows = flatten(&group, &state);
+        let rows = flatten(&group, &state, false);
         ui.synchronise(&rows);
         assert_eq!(ui.selected_thread.as_deref(), Some("root"));
         let backend = TestBackend::new(100, 28);
@@ -1157,6 +1518,9 @@ mod tests {
         assert!(rendered.contains("loading history…"));
         assert!(rendered.contains("root"));
         assert!(!rendered.contains("child"));
+        assert!(rendered.contains("Esc back"));
+        assert!(rendered.contains("q quit"));
+        assert!(!rendered.contains("q/Esc quit"));
         assert!(terminal
             .backend()
             .buffer()
@@ -1165,7 +1529,7 @@ mod tests {
             .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset));
 
         let (_, complete) = fixture();
-        let rows = flatten(&group, &complete);
+        let rows = flatten(&group, &complete, false);
         ui.synchronise(&rows);
         assert_eq!(ui.selected_thread.as_deref(), Some("root"));
         terminal
@@ -1239,10 +1603,16 @@ mod tests {
         };
         let mut root_state = AgentState::new("root".into(), "0.152.1".into());
         root_state.agent_path = Some("/root".into());
+        root_state.model = Some("gpt-5.6-sol".into());
+        root_state.reasoning_effort = Some("high".into());
+        root_state.schema_catalogued = true;
         let mut child_state = AgentState::new("child".into(), "0.152.1".into());
         child_state.parent_thread_id = Some("root".into());
         child_state.agent_path = Some("/root/child".into());
         child_state.agent_role = Some("map_implementer".into());
+        child_state.model = Some("gpt-5.6-luna".into());
+        child_state.reasoning_effort = Some("medium".into());
+        child_state.schema_catalogued = true;
         state.agents.insert("root".into(), root_state);
         state.agents.insert("child".into(), child_state);
         (group, state)
@@ -1269,7 +1639,7 @@ mod tests {
         );
         add_agent(&mut state, "sibling", "root", "/root/sibling", 50);
 
-        let ids = flatten(&group, &state)
+        let ids = flatten(&group, &state, false)
             .into_iter()
             .map(|row| row.thread_id)
             .collect::<Vec<_>>();
@@ -1284,7 +1654,7 @@ mod tests {
         add_agent(&mut state, "tie-b", "root", "/root/tie", 20);
         add_agent(&mut state, "tie-a", "root", "/root/tie", 20);
 
-        let ids = flatten(&group, &state)
+        let ids = flatten(&group, &state, false)
             .into_iter()
             .map(|row| row.thread_id)
             .collect::<Vec<_>>();
@@ -1295,19 +1665,182 @@ mod tests {
     fn selection_survives_tree_reordering_and_navigation_is_bounded() {
         let (group, mut state) = fixture();
         let mut ui = UiState::default();
-        let rows = flatten(&group, &state);
+        let rows = flatten(&group, &state, false);
         ui.synchronise(&rows);
         ui.move_selection(&rows, 1);
         assert_eq!(ui.selected_thread.as_deref(), Some("child"));
 
         add_agent(&mut state, "newer", "root", "/root/newer", 100);
-        let rows = flatten(&group, &state);
+        let rows = flatten(&group, &state, false);
         ui.synchronise(&rows);
         assert_eq!(ui.selected_thread.as_deref(), Some("child"));
         ui.move_selection(&rows, 99);
         assert_eq!(ui.selected_thread.as_deref(), Some("child"));
         ui.move_selection(&rows, -99);
         assert_eq!(ui.selected_thread.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn compact_tree_labels_and_completed_filter_preserve_live_descendants() {
+        let (group, mut state) = fixture();
+        state.agents.get_mut("child").unwrap().latest_turn.status = TurnStatus::Completed;
+        add_agent(
+            &mut state,
+            "grandchild",
+            "child",
+            "/root/child/grandchild",
+            100,
+        );
+
+        let rows = flatten(&group, &state, false);
+        let child_row = rows.iter().find(|row| row.thread_id == "child").unwrap();
+        let child_line = line_text(&tree_line(
+            child_row,
+            &state.agents["child"],
+            Palette::new(ColorMode::None),
+        ));
+        assert!(child_line.starts_with("  ↪ child"));
+        assert!(!child_line.contains("/root/"));
+
+        let visible = flatten(&group, &state, true);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|row| row.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "grandchild"]
+        );
+        let grandchild = visible
+            .iter()
+            .find(|row| row.thread_id == "grandchild")
+            .unwrap();
+        assert_eq!(grandchild.depth, 1);
+        let grandchild_line = line_text(&tree_line(
+            grandchild,
+            &state.agents["grandchild"],
+            Palette::new(ColorMode::None),
+        ));
+        assert!(grandchild_line.starts_with("  ↪ grandchild"));
+
+        let mut ui = UiState::default();
+        ui.toggle_completed();
+        ui.synchronise(&visible);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &group,
+                    &state,
+                    &visible,
+                    &ui,
+                    false,
+                    Palette::new(ColorMode::None),
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("h show completed"));
+        assert!(!rendered.contains("COMPLETED"));
+    }
+
+    #[test]
+    fn interaction_history_opens_at_latest_and_preserves_scrolled_position() {
+        let (group, mut state) = fixture();
+        {
+            let root = state.agents.get_mut("root").unwrap();
+            for record in [
+                serde_json::json!({
+                    "ordinal": 10,
+                    "timestamp": "2026-09-03T10:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn"}
+                }),
+                serde_json::json!({
+                    "ordinal": 11,
+                    "timestamp": "2026-09-03T10:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "working"}
+                }),
+                serde_json::json!({
+                    "ordinal": 12,
+                    "timestamp": "2026-09-03T10:00:02Z",
+                    "type": "response_item",
+                    "payload": {"type": "function_call", "call_id": "call", "name": "exec"}
+                }),
+            ] {
+                assert!(crate::model::reduce(root, &record));
+            }
+        }
+
+        let rows = flatten(&group, &state, false);
+        let mut ui = UiState::default();
+        ui.synchronise(&rows);
+        ui.open_history(&state);
+        assert_eq!(
+            ui.history.as_ref().unwrap().selected_sequence,
+            state.agents["root"]
+                .interactions
+                .back()
+                .map(|interaction| interaction.sequence)
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &group,
+                    &state,
+                    &rows,
+                    &ui,
+                    false,
+                    Palette::new(ColorMode::None),
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("interactions · root · 3 retained"));
+        assert!(rendered.contains("content: started exec"));
+        assert!(rendered.contains("↑/k older"));
+        assert!(!rendered.contains("h hide completed"));
+
+        ui.move_history(&state, -1);
+        let selected = ui.history.as_ref().unwrap().selected_sequence;
+        let selected_summary = state.agents["root"]
+            .interactions
+            .iter()
+            .find(|interaction| Some(interaction.sequence) == selected)
+            .unwrap()
+            .summary
+            .as_str();
+        assert_eq!(selected_summary, "working");
+
+        let root = state.agents.get_mut("root").unwrap();
+        assert!(crate::model::reduce(
+            root,
+            &serde_json::json!({
+                "ordinal": 13,
+                "type": "event_msg",
+                "payload": {"type": "agent_reasoning", "text": "new live event"}
+            }),
+        ));
+        ui.synchronise_history(&state);
+        assert_eq!(ui.history.as_ref().unwrap().selected_sequence, selected);
+        assert!(ui.close_history());
+        assert!(ui.history.is_none());
     }
 
     #[test]
@@ -1321,7 +1854,7 @@ mod tests {
                     frame,
                     &group,
                     &state,
-                    &flatten(&group, &state),
+                    &flatten(&group, &state, false),
                     &UiState::default(),
                     false,
                     Palette::new(ColorMode::Auto),
@@ -1388,6 +1921,8 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("fallback"));
         assert!(text.contains("second-s"));
+        assert!(text.contains("q/Esc quit"));
+        assert!(!text.contains("Esc back"));
         assert!(!text.contains('\u{1b}'));
 
         let mut tiny = Terminal::new(TestBackend::new(20, 4)).unwrap();
@@ -1443,7 +1978,7 @@ mod tests {
                     frame,
                     &group,
                     &state,
-                    &flatten(&group, &state),
+                    &flatten(&group, &state, false),
                     &UiState::default(),
                     false,
                     Palette::new(ColorMode::Auto),
@@ -1458,6 +1993,130 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(!text.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn tree_and_details_prioritise_known_actionable_information() {
+        let (group, mut state) = fixture();
+        let rows = flatten(&group, &state, false);
+        let palette = Palette::new(ColorMode::Auto);
+
+        {
+            let root = state.agents.get("root").unwrap();
+            let line = tree_line(&rows[0], root, palette);
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>()
+                .concat();
+
+            let model_position = text.find("gpt-5.6-sol").unwrap();
+            let effort_position = text.find("high").unwrap();
+            let status_position = text.find("PENDING").unwrap();
+            assert!(model_position < effort_position);
+            assert!(effort_position < status_position);
+
+            let model_span = line
+                .spans
+                .iter()
+                .find(|span| span.content.contains("gpt-5.6-sol"))
+                .unwrap();
+            let effort_span = line
+                .spans
+                .iter()
+                .find(|span| span.content.contains("high"))
+                .unwrap();
+            assert_eq!(model_span.style.fg, Some(Color::LightMagenta));
+            assert_eq!(effort_span.style.fg, Some(Color::LightYellow));
+
+            let details = detail_lines(Some(root), &state, &group, palette);
+            let details_text = details
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>()
+                .concat();
+            for absent in [
+                "schema catalogued",
+                "compatibility ingestable",
+                "final:",
+                "untrusted result claim:",
+                "unknown",
+                "session health:",
+            ] {
+                assert!(
+                    !details_text.contains(absent),
+                    "unavailable or healthy detail should be omitted: {absent}"
+                );
+            }
+            for line in &details {
+                let label = line.spans.first().unwrap();
+                assert!(label.content.ends_with(": "));
+                assert_eq!(label.style.fg, Some(Color::Cyan));
+            }
+        }
+
+        {
+            let root = state.agents.get_mut("root").unwrap();
+            root.schema_catalogued = false;
+            root.coverage = CoverageLevel::Unknown;
+        }
+        state.data_health.unknown_records = 31_098;
+        state.data_health.unknown_events = 33_270;
+        state.data_health.malformed_records = 8;
+        state.data_health.oversized_records = 2;
+
+        let root = state.agents.get("root").unwrap();
+        let details = detail_lines(Some(root), &state, &group, palette);
+        let details_text = details
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(details_text.contains("schema missing"));
+        assert!(details_text.contains("compatibility unknown"));
+        assert!(details_text.contains("session health: "));
+        assert!(details_text.contains("malformed 8"));
+        assert!(details_text.contains("oversized 2"));
+        assert!(!details_text.contains("unknown records"));
+        assert!(!details_text.contains("unknown events"));
+        assert!(!details_text.contains("latest diagnostic"));
+        assert!(details
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| {
+                span.content.contains("schema missing")
+                    || span.content.contains("compatibility unknown")
+                    || span.content.contains("malformed 8")
+            })
+            .all(|span| span.style.fg == Some(Color::Red)));
+    }
+
+    #[test]
+    fn duplicate_completed_output_is_rendered_once_as_message() {
+        let (group, mut state) = fixture();
+        {
+            let root = state.agents.get_mut("root").unwrap();
+            root.latest_turn.status = TurnStatus::Completed;
+            root.last_message = Some("shared completion".into());
+            root.final_message = Some("shared completion".into());
+        }
+
+        let root = state.agents.get("root").unwrap();
+        let details = detail_lines(Some(root), &state, &group, Palette::new(ColorMode::Auto));
+        let details_text = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(details_text.contains("message: shared completion"));
+        assert!(!details_text.contains("activity: shared completion"));
+        assert!(!details_text.contains("final: shared completion"));
+
+        state.agents.get_mut("root").unwrap().final_message = Some("distinct final".into());
+        let root = state.agents.get("root").unwrap();
+        let details = detail_lines(Some(root), &state, &group, Palette::new(ColorMode::Auto));
+        let details_text = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(details_text.contains("message: shared completion"));
+        assert!(details_text.contains("final: distinct final"));
     }
 
     fn assert_reset_colours(terminal: &Terminal<TestBackend>) {
@@ -1489,7 +2148,7 @@ mod tests {
             );
         }
 
-        let rows = flatten(&group, &state);
+        let rows = flatten(&group, &state, false);
         let mut ui = UiState::default();
         ui.synchronise(&rows);
         let mut tree_terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -1497,7 +2156,12 @@ mod tests {
             .draw(|frame| draw(frame, &group, &state, &rows, &ui, false, palette))
             .unwrap();
         let tree_cells = tree_terminal.backend().buffer().content();
-        for expected in [Color::Cyan, Color::DarkGray, Color::Blue, Color::Yellow] {
+        for expected in [
+            Color::Cyan,
+            Color::Blue,
+            Color::LightMagenta,
+            Color::LightYellow,
+        ] {
             assert!(
                 tree_cells.iter().any(|cell| cell.fg == expected),
                 "tree should render semantic foreground {expected:?}"
@@ -1531,7 +2195,7 @@ mod tests {
             .iter()
             .any(|cell| cell.modifier.contains(Modifier::REVERSED)));
 
-        let rows = flatten(&group, &state);
+        let rows = flatten(&group, &state, false);
         let mut ui = UiState::default();
         ui.synchronise(&rows);
         let mut tree_terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();

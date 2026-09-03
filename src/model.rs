@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 const TEXT_LIMIT: usize = 512;
 const DIAGNOSTIC_LIMIT: usize = 20;
+const INTERACTION_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageLevel {
@@ -46,12 +47,44 @@ pub struct InFlightCall {
     pub ordinal: Option<u64>,
     pub sequence: u64,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionKind {
+    Lifecycle,
+    Tool,
+    Reasoning,
+    Message,
+    Communication,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentInteraction {
+    pub sequence: u64,
+    pub kind: InteractionKind,
+    pub summary: String,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub ordinal: Option<u64>,
+}
 #[derive(Debug, Clone)]
 pub struct DiagnosticSample {
     pub rollout_path: PathBuf,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "required diagnostic evidence even though raw samples are hidden from the normal TUI"
+        )
+    )]
     pub byte_offset: u64,
     pub cli_version: Option<String>,
     pub kind: String,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "required diagnostic evidence even though raw samples are hidden from the normal TUI"
+        )
+    )]
     pub ordinal: Option<u64>,
     pub detail: Option<String>,
 }
@@ -83,6 +116,8 @@ pub struct AgentState {
     pub agent_role: Option<String>,
     pub agent_nickname: Option<String>,
     pub cli_version: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub schema_catalogued: bool,
     pub schema_family: Option<String>,
     pub coverage: CoverageLevel,
@@ -91,6 +126,8 @@ pub struct AgentState {
     pub last_activity_at: Option<DateTime<Utc>>,
     pub next_call_sequence: u64,
     pub in_flight_calls: HashMap<String, InFlightCall>,
+    pub interactions: VecDeque<AgentInteraction>,
+    pub next_interaction_sequence: u64,
     pub last_reasoning_summary: Option<String>,
     pub last_message: Option<String>,
     pub final_message: Option<String>,
@@ -107,6 +144,8 @@ impl AgentState {
             agent_role: None,
             agent_nickname: None,
             cli_version,
+            model: None,
+            reasoning_effort: None,
             schema_catalogued: false,
             schema_family: None,
             coverage: CoverageLevel::Ingestable,
@@ -115,6 +154,8 @@ impl AgentState {
             last_activity_at: None,
             next_call_sequence: 0,
             in_flight_calls: HashMap::new(),
+            interactions: VecDeque::new(),
+            next_interaction_sequence: 0,
             last_reasoning_summary: None,
             last_message: None,
             final_message: None,
@@ -146,6 +187,37 @@ impl AgentState {
     pub fn active_call_evidence(&self) -> Option<(Option<DateTime<Utc>>, Option<u64>)> {
         self.newest_in_flight_call()
             .map(|call| (call.started_at, call.ordinal))
+    }
+
+    fn record_interaction(
+        &mut self,
+        kind: InteractionKind,
+        summary: impl AsRef<str>,
+        timestamp: Option<DateTime<Utc>>,
+        ordinal: Option<u64>,
+    ) {
+        let summary = sanitise(summary.as_ref());
+        if let Some(previous) = self
+            .interactions
+            .back_mut()
+            .filter(|previous| previous.kind == kind && previous.summary == summary)
+        {
+            previous.timestamp = timestamp.or(previous.timestamp);
+            previous.ordinal = ordinal.or(previous.ordinal);
+            return;
+        }
+        let sequence = self.next_interaction_sequence;
+        self.next_interaction_sequence += 1;
+        if self.interactions.len() == INTERACTION_LIMIT {
+            self.interactions.pop_front();
+        }
+        self.interactions.push_back(AgentInteraction {
+            sequence,
+            kind,
+            summary,
+            timestamp,
+            ordinal,
+        });
     }
 }
 
@@ -209,6 +281,19 @@ fn plain_text(content: &Value) -> Option<String> {
         .join(" ");
     (!text.is_empty()).then_some(text)
 }
+fn reasoning_summary(payload: &Value) -> Option<String> {
+    payload
+        .get("summary")
+        .and_then(plain_text)
+        .or_else(|| {
+            payload
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .map(|text| sanitise(&text.replace("**", "")))
+}
+
 fn receipt_claim(text: &str) -> Option<String> {
     text.lines()
         .find_map(|line| line.strip_prefix("status="))
@@ -286,6 +371,15 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
     agent.last_ordinal = ordinal.or(agent.last_ordinal);
     let payload = &record["payload"];
     match record["type"].as_str() {
+        Some("turn_context") => {
+            if let Some(model) = payload.get("model").and_then(Value::as_str) {
+                agent.model = Some(sanitise(model));
+            }
+            if let Some(effort) = payload.get("effort").and_then(Value::as_str) {
+                agent.reasoning_effort = Some(sanitise(effort));
+            }
+            true
+        }
         Some("event_msg") => match payload["type"].as_str() {
             Some("task_started") => {
                 agent.latest_turn = TurnState {
@@ -305,6 +399,12 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 agent.result_status_claim = None;
                 agent.last_communication = None;
                 agent.last_activity_at = timestamp;
+                agent.record_interaction(
+                    InteractionKind::Lifecycle,
+                    "turn started",
+                    agent.latest_turn.started_at,
+                    ordinal,
+                );
                 true
             }
             Some("task_complete") => {
@@ -317,6 +417,20 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 } else {
                     agent.final_message = agent.last_message.clone();
                 }
+                if let Some(final_message) = agent.final_message.clone() {
+                    agent.record_interaction(
+                        InteractionKind::Message,
+                        final_message,
+                        agent.latest_turn.completed_at,
+                        ordinal,
+                    );
+                }
+                agent.record_interaction(
+                    InteractionKind::Lifecycle,
+                    "turn completed",
+                    agent.latest_turn.completed_at,
+                    ordinal,
+                );
                 agent.in_flight_calls.clear();
                 agent.last_activity_at = timestamp;
                 true
@@ -324,11 +438,23 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
             Some("turn_aborted") => {
                 agent.latest_turn.status = TurnStatus::Interrupted;
                 agent.last_activity_at = timestamp;
+                agent.record_interaction(
+                    InteractionKind::Lifecycle,
+                    "turn interrupted",
+                    timestamp,
+                    ordinal,
+                );
                 true
             }
             Some("error") => {
                 agent.latest_turn.status = TurnStatus::Errored;
                 agent.last_activity_at = timestamp;
+                agent.record_interaction(
+                    InteractionKind::Lifecycle,
+                    "turn errored",
+                    timestamp,
+                    ordinal,
+                );
                 true
             }
             Some("item_completed") | Some("item_started") => {
@@ -342,15 +468,28 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                                 a.iter().filter_map(Value::as_str).find(|s| !s.is_empty())
                             })
                             .map(|s| sanitise(&s.replace("**", "")));
-                        if summary.is_some() {
-                            agent.last_reasoning_summary = summary;
+                        if let Some(summary) = summary {
+                            agent.record_interaction(
+                                InteractionKind::Reasoning,
+                                &summary,
+                                timestamp,
+                                ordinal,
+                            );
+                            agent.last_reasoning_summary = Some(summary);
                             agent.last_activity_at = timestamp;
                         }
                     }
                     Some("AgentMessage") => {
                         if let Some(text) = plain_text(&item["content"]) {
+                            let text = sanitise(&text);
                             agent.result_status_claim = receipt_claim(&text);
-                            agent.last_message = Some(sanitise(&text));
+                            agent.record_interaction(
+                                InteractionKind::Message,
+                                &text,
+                                timestamp,
+                                ordinal,
+                            );
+                            agent.last_message = Some(text);
                             agent.last_activity_at = timestamp;
                         }
                     }
@@ -363,7 +502,14 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                             .and_then(Value::as_str)
                         {
                             if payload["type"] == "item_completed" {
-                                agent.in_flight_calls.remove(id);
+                                if let Some(call) = agent.in_flight_calls.remove(id) {
+                                    agent.record_interaction(
+                                        InteractionKind::Tool,
+                                        format!("finished {}", call.tool_name),
+                                        timestamp,
+                                        ordinal,
+                                    );
+                                }
                             }
                         }
                         agent.last_activity_at = timestamp;
@@ -381,8 +527,28 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     .or_else(|| payload.get("text"))
                     .and_then(Value::as_str)
                 {
-                    agent.result_status_claim = receipt_claim(raw);
-                    agent.last_message = Some(sanitise(raw));
+                    let message = sanitise(raw);
+                    agent.result_status_claim = receipt_claim(&message);
+                    agent.record_interaction(
+                        InteractionKind::Message,
+                        &message,
+                        timestamp,
+                        ordinal,
+                    );
+                    agent.last_message = Some(message);
+                    agent.last_activity_at = timestamp;
+                }
+                true
+            }
+            Some("agent_reasoning") => {
+                if let Some(summary) = reasoning_summary(payload) {
+                    agent.record_interaction(
+                        InteractionKind::Reasoning,
+                        &summary,
+                        timestamp,
+                        ordinal,
+                    );
+                    agent.last_reasoning_summary = Some(summary);
                     agent.last_activity_at = timestamp;
                 }
                 true
@@ -403,6 +569,12 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_owned();
+                agent.record_interaction(
+                    InteractionKind::Tool,
+                    format!("started {tool_name}"),
+                    timestamp,
+                    ordinal,
+                );
                 agent.in_flight_calls.insert(
                     call_id,
                     InFlightCall {
@@ -418,15 +590,42 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
             }
             Some("custom_tool_call_output") | Some("function_call_output") => {
                 let id = payload["call_id"].as_str().expect("validated call_id");
-                agent.in_flight_calls.remove(id);
+                if let Some(call) = agent.in_flight_calls.remove(id) {
+                    agent.record_interaction(
+                        InteractionKind::Tool,
+                        format!("finished {}", call.tool_name),
+                        timestamp,
+                        ordinal,
+                    );
+                }
                 agent.last_activity_at = timestamp;
+                true
+            }
+            Some("reasoning") => {
+                if let Some(summary) = reasoning_summary(payload) {
+                    agent.record_interaction(
+                        InteractionKind::Reasoning,
+                        &summary,
+                        timestamp,
+                        ordinal,
+                    );
+                    agent.last_reasoning_summary = Some(summary);
+                    agent.last_activity_at = timestamp;
+                }
                 true
             }
             Some("message") => {
                 if payload["role"].as_str() == Some("assistant") {
                     if let Some(text) = plain_text(&payload["content"]) {
+                        let text = sanitise(&text);
                         agent.result_status_claim = receipt_claim(&text);
-                        agent.last_message = Some(sanitise(&text));
+                        agent.record_interaction(
+                            InteractionKind::Message,
+                            &text,
+                            timestamp,
+                            ordinal,
+                        );
+                        agent.last_message = Some(text);
                         agent.last_activity_at = timestamp;
                     }
                 }
@@ -438,11 +637,18 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 {
                     let author = payload["author"].as_str().expect("validated author");
                     let recipient = payload["recipient"].as_str().expect("validated recipient");
-                    agent.last_communication = Some(sanitise(&format!(
+                    let communication = sanitise(&format!(
                         "message {} → {}",
                         sanitise(author),
                         sanitise(recipient)
-                    )));
+                    ));
+                    agent.record_interaction(
+                        InteractionKind::Communication,
+                        &communication,
+                        timestamp,
+                        ordinal,
+                    );
+                    agent.last_communication = Some(communication);
                     agent.last_activity_at = timestamp;
                 }
                 true
@@ -494,6 +700,19 @@ mod tests {
         );
         assert_eq!(a.latest_turn.status, TurnStatus::Running);
         assert!(a.final_message.is_none());
+        assert_eq!(
+            a.interactions
+                .iter()
+                .map(|interaction| interaction.summary.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "turn started",
+                "old",
+                "status=BLOCKED",
+                "turn completed",
+                "turn started"
+            ]
+        );
     }
     #[test]
     fn calls_overlap_deterministically() {
@@ -518,6 +737,13 @@ mod tests {
     #[test]
     fn reasoning_sanitising_and_bookkeeping() {
         let mut a = agent();
+        assert!(reduce(
+            &mut a,
+            &r(r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"high"}}"#,),
+        ));
+        assert_eq!(a.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(a.reasoning_effort.as_deref(), Some("high"));
+
         let record = serde_json::json!({
             "timestamp":"2024-01-01T00:00:00Z",
             "type":"event_msg",
@@ -527,6 +753,26 @@ mod tests {
         });
         reduce(&mut a, &record);
         assert_eq!(a.last_reasoning_summary.as_deref(), Some("safe text"));
+
+        assert!(reduce(
+            &mut a,
+            &r(
+                r#"{"timestamp":"2024-01-01T00:00:01Z","type":"event_msg","payload":{"type":"agent_reasoning","text":"**current summary**"}}"#,
+            ),
+        ));
+        assert_eq!(a.last_reasoning_summary.as_deref(), Some("current summary"));
+
+        assert!(reduce(
+            &mut a,
+            &r(
+                r#"{"timestamp":"2024-01-01T00:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"response summary"}]}}"#,
+            ),
+        ));
+        assert_eq!(
+            a.last_reasoning_summary.as_deref(),
+            Some("response summary")
+        );
+
         let time = a.last_activity_at;
         reduce(
             &mut a,
@@ -535,6 +781,45 @@ mod tests {
             ),
         );
         assert_eq!(a.last_activity_at, time);
+    }
+
+    #[test]
+    fn interaction_history_is_bounded_and_deduplicates_adjacent_messages() {
+        let mut a = agent();
+        for ordinal in 0..INTERACTION_LIMIT + 4 {
+            assert!(reduce(
+                &mut a,
+                &serde_json::json!({
+                    "ordinal": ordinal,
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": format!("message {ordinal}")}
+                }),
+            ));
+        }
+        assert_eq!(a.interactions.len(), INTERACTION_LIMIT);
+        assert_eq!(a.interactions.front().unwrap().summary, "message 4");
+        assert_eq!(
+            a.interactions.back().unwrap().summary,
+            format!("message {}", INTERACTION_LIMIT + 3)
+        );
+
+        let len = a.interactions.len();
+        assert!(reduce(
+            &mut a,
+            &serde_json::json!({
+                "ordinal": INTERACTION_LIMIT + 4,
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": format!("message {}", INTERACTION_LIMIT + 3)
+                }
+            }),
+        ));
+        assert_eq!(a.interactions.len(), len);
+        assert_eq!(
+            a.interactions.back().unwrap().ordinal,
+            Some((INTERACTION_LIMIT + 4) as u64)
+        );
     }
     #[test]
     fn encrypted_message_is_an_accepted_envelope() {
@@ -607,6 +892,13 @@ mod tests {
         assert!(reduce(&mut state, &valid));
         assert_eq!(state.in_flight_calls["c"].summary, "running exec");
         assert!(!state.in_flight_calls["c"].summary.contains("secret"));
+        assert_eq!(state.interactions.back().unwrap().summary, "started exec");
+        assert!(!state
+            .interactions
+            .back()
+            .unwrap()
+            .summary
+            .contains("secret"));
     }
     #[test]
     fn exact_wait_agent_tracks_only_newest_running_call() {

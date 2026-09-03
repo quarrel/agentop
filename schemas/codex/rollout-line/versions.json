@@ -1,0 +1,916 @@
+{
+  "format_version": 1,
+  "canonicalisation": "sorted-json-with-trailing-newline-v1",
+  "versions": {
+    "0.149.0": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0",
+        "tag_object": "a4e15bf371341b067c8278d3b70b1a8c7b3d793e",
+        "commit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.149.0-alpha.1": {
+      "rollout_line_sha256": "a4acfddd05d80bac4ac5168e5b95abcb1dc85302fc829670df9332d8a6a6588d",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.1",
+        "tag_object": "9072ebb22a566df4509fa336a5af9f8a9e491c39",
+        "commit": "c767040aebb84b0ecdb1f8dbae092f12bf2d55af",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "7b7c70581770b1f8cb341d7ab29f94e91e5446e7bb8d046c13504721e903768a"
+        }
+      }
+    },
+    "0.149.0-alpha.2": {
+      "rollout_line_sha256": "a4acfddd05d80bac4ac5168e5b95abcb1dc85302fc829670df9332d8a6a6588d",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.2",
+        "tag_object": "506f5cef6b1a071c3ded5032dc3a05c4cc606fc5",
+        "commit": "41f54a9cf9aa1ba0ee78b4c59b129dffafc6b7d6",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "7b7c70581770b1f8cb341d7ab29f94e91e5446e7bb8d046c13504721e903768a"
+        }
+      }
+    },
+    "0.149.0-alpha.3": {
+      "rollout_line_sha256": "a4acfddd05d80bac4ac5168e5b95abcb1dc85302fc829670df9332d8a6a6588d",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.3",
+        "tag_object": "3446ac047fd84f1b245cbc8ce4bc94dc5a40736a",
+        "commit": "7df9d8d8c625c5d9cbb3c2399cff120e3f806e3a",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "7b7c70581770b1f8cb341d7ab29f94e91e5446e7bb8d046c13504721e903768a"
+        }
+      }
+    },
+    "0.149.0-alpha.4": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.4",
+        "tag_object": "58ba6b9d991d95ec8f5fe19b884c4a060e616aa3",
+        "commit": "92920d051f9f43b114459b90372056002b74045e",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.149.0-alpha.4.1": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.4.1",
+        "tag_object": "e962398af66be22f74cf6c3f196fd7f46a3e89de",
+        "commit": "97e7c55e2b64738ec6fe2311ad77a60b106fefae",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.149.0-alpha.4.2": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.4.2",
+        "tag_object": "3553c97ae588665f7d727489bbfcadffb0e56c67",
+        "commit": "e4d0c7d9f5fa3bb4f4208cea2063d58ba4d14598",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.149.0-alpha.4.3": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.4.3",
+        "tag_object": "ccefab2e168fb5d07934d5c2fe2988b730679788",
+        "commit": "e8f485bdf82a4cb9283e3e5305011b7b9d360b38",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.149.0-alpha.5": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.5",
+        "tag_object": "bd1f4aca8de9b27a51a7ca9612a5a21a5fffdd0c",
+        "commit": "37c388ca98144a9e3e5ce66f689434dfc238e77d",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.149.0-alpha.6": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.6",
+        "tag_object": "2b214fe66366c5c2006b0597ad7d6d612f5f9096",
+        "commit": "0206567cce8c02e1e8cfc2f5bf1540a2d949bf8f",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "c67a4d1c2ced320f0ddfb460aaa9d21b08870a9dc5f5ff978da9358c216bbf6f"
+        }
+      }
+    },
+    "0.149.0-alpha.7": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.7",
+        "tag_object": "14b01892c76d24312d751d0ebe7a03c8606cb012",
+        "commit": "57f73af6eeb362531f50424e99bd289fa1108f08",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "c67a4d1c2ced320f0ddfb460aaa9d21b08870a9dc5f5ff978da9358c216bbf6f"
+        }
+      }
+    },
+    "0.149.0-alpha.7.1": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.7.1",
+        "tag_object": "c06c468a2648b7f050bf02338a12bf3480d77840",
+        "commit": "0e015a7a0eef52047fea8ded24f8b32afbafd527",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "c67a4d1c2ced320f0ddfb460aaa9d21b08870a9dc5f5ff978da9358c216bbf6f"
+        }
+      }
+    },
+    "0.149.0-alpha.7.2": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.0-alpha.7.2",
+        "tag_object": "fe27c81bf1854c6ca6fd7ff36183e30cd470d358",
+        "commit": "70b76b80f2ea1807c2ede8c11eac8ebe73af3a1d",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "c67a4d1c2ced320f0ddfb460aaa9d21b08870a9dc5f5ff978da9358c216bbf6f"
+        }
+      }
+    },
+    "0.149.1": {
+      "rollout_line_sha256": "0401b0f306ec02c52e82d33a0bdd2b3435befaee9feb5573496e31c441822184",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.149.1",
+        "tag_object": "980a6d12110b110d29ec13bdcbe14011100b3566",
+        "commit": "ff29a44391deccde0aba0f8390337d7f3c319ea4",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b0cb2524f4719764b11fe4a0321ca300a61daf081bbc391a21e2417254dafb3"
+        }
+      }
+    },
+    "0.150.0": {
+      "rollout_line_sha256": "072eb3e62956872c306a74430e5c6643b93e407fb8e48b622d9081ea66726222",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0",
+        "tag_object": "9bdd7a39c5034657dfbbb89381cd9364f61eee11",
+        "commit": "3b3b4f8fb3f6403e72c2d0533ed0d2f309c59717",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d7f194d4ffa2ac2636295575b8da650292f8d16dbe2e6867bde1f3d7d31b11da"
+        }
+      }
+    },
+    "0.150.0-alpha.1": {
+      "rollout_line_sha256": "e1aeebe25467b4ddd5207541c316474ac9d97a6517756fb5c412b105139877ab",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.1",
+        "tag_object": "2d49bd1373d41fa4bc773a5dc80ed783277c4d61",
+        "commit": "6acc7fdf968a99e7e28ad244544306ab398d1af7",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "fd46d1f89d223e6c415f548df285fdffc4e0d95854d4101524b21fa067856f49"
+        }
+      }
+    },
+    "0.150.0-alpha.10": {
+      "rollout_line_sha256": "072eb3e62956872c306a74430e5c6643b93e407fb8e48b622d9081ea66726222",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.10",
+        "tag_object": "61e3371c90703a512bf2381fbfc36adf1bd31760",
+        "commit": "f71d91893cc42423fcd55d00f7f621e42e0ce650",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "4fd463a171e17d99f03522c67b53f54bf6fd7c951df7e1a3b2a1c2fb246852df"
+        }
+      }
+    },
+    "0.150.0-alpha.11": {
+      "rollout_line_sha256": "506fbc1ba5c2d0ffd59e1526fd7fbfe1f5e9a69d84fae78934d33176cdbb7233",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.11",
+        "tag_object": "7ae7a5217ee53293a34b826cdd2f791542de9ab1",
+        "commit": "8e93b1a405e02f8797a04d747bb7d1654b839685",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "6e0aade1a1cb9259e85f01d4904eb6c0c86a45ac458653dbe1826c0664af62af"
+        }
+      }
+    },
+    "0.150.0-alpha.12": {
+      "rollout_line_sha256": "506fbc1ba5c2d0ffd59e1526fd7fbfe1f5e9a69d84fae78934d33176cdbb7233",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.12",
+        "tag_object": "3a41805c89e2c7f7222e8a22eae967f576d3a831",
+        "commit": "7f3519b2286fdf0f8fbfcd13be4008911e68db2b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "6e0aade1a1cb9259e85f01d4904eb6c0c86a45ac458653dbe1826c0664af62af"
+        }
+      }
+    },
+    "0.150.0-alpha.12.1": {
+      "rollout_line_sha256": "506fbc1ba5c2d0ffd59e1526fd7fbfe1f5e9a69d84fae78934d33176cdbb7233",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.12.1",
+        "tag_object": "d4e2c9a11e017c8c278491e67a225ff787b1ccb7",
+        "commit": "785fb5086ca36f1182238aef83282d238cc1d878",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "6e0aade1a1cb9259e85f01d4904eb6c0c86a45ac458653dbe1826c0664af62af"
+        }
+      }
+    },
+    "0.150.0-alpha.12.2": {
+      "rollout_line_sha256": "506fbc1ba5c2d0ffd59e1526fd7fbfe1f5e9a69d84fae78934d33176cdbb7233",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.12.2",
+        "tag_object": "3a8123623648bbe638adcac805e332352a51d275",
+        "commit": "a9802304f60ab14c0b07e3ee0db9a9c105ab0cb3",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "6e0aade1a1cb9259e85f01d4904eb6c0c86a45ac458653dbe1826c0664af62af"
+        }
+      }
+    },
+    "0.150.0-alpha.13": {
+      "rollout_line_sha256": "506fbc1ba5c2d0ffd59e1526fd7fbfe1f5e9a69d84fae78934d33176cdbb7233",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.13",
+        "tag_object": "8986f792fc8d7e1ff4a020a916ee76e9884f520a",
+        "commit": "c080ad22b3744f3cefcdeeb134ee17c0093d16a1",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "6e0aade1a1cb9259e85f01d4904eb6c0c86a45ac458653dbe1826c0664af62af"
+        }
+      }
+    },
+    "0.150.0-alpha.2": {
+      "rollout_line_sha256": "e1aeebe25467b4ddd5207541c316474ac9d97a6517756fb5c412b105139877ab",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.2",
+        "tag_object": "81b45d69f6331f03383f76432d8ed1dfa89fa44e",
+        "commit": "b93e2e557447483fa51f674737c223f0fae36cca",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "fd46d1f89d223e6c415f548df285fdffc4e0d95854d4101524b21fa067856f49"
+        }
+      }
+    },
+    "0.150.0-alpha.3": {
+      "rollout_line_sha256": "e1aeebe25467b4ddd5207541c316474ac9d97a6517756fb5c412b105139877ab",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.3",
+        "tag_object": "fc0d9c2453b801904004e64a03d5ba2636b9ac66",
+        "commit": "2dffc1dd87a3054337ea87d5f2f73305c96a4771",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "48e9a5fbf9f8d9c648af73aa1ecec5ed4ab3f3b18113f3c819c6c826aac3bd5e"
+        }
+      }
+    },
+    "0.150.0-alpha.4": {
+      "rollout_line_sha256": "e1aeebe25467b4ddd5207541c316474ac9d97a6517756fb5c412b105139877ab",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.4",
+        "tag_object": "93715c38d487e080d7e41626de41133cb7ae2da9",
+        "commit": "3ae5bbf76cfceb6512efc1bd3f6b95d0b12242f5",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "48e9a5fbf9f8d9c648af73aa1ecec5ed4ab3f3b18113f3c819c6c826aac3bd5e"
+        }
+      }
+    },
+    "0.150.0-alpha.5": {
+      "rollout_line_sha256": "e1aeebe25467b4ddd5207541c316474ac9d97a6517756fb5c412b105139877ab",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.5",
+        "tag_object": "afd2928d125f8c8c6668c08cc355227f0d92b9ed",
+        "commit": "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "48e9a5fbf9f8d9c648af73aa1ecec5ed4ab3f3b18113f3c819c6c826aac3bd5e"
+        }
+      }
+    },
+    "0.150.0-alpha.6": {
+      "rollout_line_sha256": "7a299575dfda2acd59d45334565e566b5578e405dae68ff45c1735f7542a861d",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.6",
+        "tag_object": "05939ff6e388c195b183c544368c7ef151c37280",
+        "commit": "bcb6f90f7f886f70a4812a0c05b865b9f6595e90",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "a415d3b44dbe33942e519200a655eb1adfbf836d28f7a16e0273f2dc96588559"
+        }
+      }
+    },
+    "0.150.0-alpha.7": {
+      "rollout_line_sha256": "7a299575dfda2acd59d45334565e566b5578e405dae68ff45c1735f7542a861d",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.7",
+        "tag_object": "69b81b46830757c3a7adbfc500ca39503e586ba6",
+        "commit": "03eec0241d14dd11a8e4d1e2c4ced5eb6c607ffc",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "838b672d471003228447f6a2b55a0f160d44abebe886b2439df760255e57149f"
+        }
+      }
+    },
+    "0.150.0-alpha.8": {
+      "rollout_line_sha256": "43997175eee0657589e071fc7d22a67a9279387cd5473c81ec83909a2d41c7db",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.8",
+        "tag_object": "4111e744b09ceed970f5d88e7775ca583f963ec4",
+        "commit": "fcbdb57851be70192fd0c21faa9e529146e93ff1",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "a3b58e0138f5710f1caea9c15b634810adfb2c9ca0dd71a8ca0624e6c5dcd0db"
+        }
+      }
+    },
+    "0.150.0-alpha.9": {
+      "rollout_line_sha256": "072eb3e62956872c306a74430e5c6643b93e407fb8e48b622d9081ea66726222",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.0-alpha.9",
+        "tag_object": "35791745e43b337747f4db525ce231c65421c318",
+        "commit": "a1a7e0b1d11436a3c33d14b2f019004bdf453777",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d7f194d4ffa2ac2636295575b8da650292f8d16dbe2e6867bde1f3d7d31b11da"
+        }
+      }
+    },
+    "0.150.1": {
+      "rollout_line_sha256": "072eb3e62956872c306a74430e5c6643b93e407fb8e48b622d9081ea66726222",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.150.1",
+        "tag_object": "0eb410ad0dd161ea323b05452f978de01cd63430",
+        "commit": "90854393966b21e9ebfd21b122334eb09a20c93d",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d7f194d4ffa2ac2636295575b8da650292f8d16dbe2e6867bde1f3d7d31b11da"
+        }
+      }
+    },
+    "0.151.0": {
+      "rollout_line_sha256": "0aeb3ab00021532d4eaf5aaf605e74477b9d79f202b7680d64b9e75121a74f6f",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0",
+        "tag_object": "d8673cb68e349c208659b986697773d3145dbb14",
+        "commit": "78c290807ce710180111df227df3b7a4fe845452",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "56895c586151628e8f5448e43c21f65b933d5be4bec62c8beea7d96a07b3dd42"
+        }
+      }
+    },
+    "0.151.0-alpha.1": {
+      "rollout_line_sha256": "942ca14a548021b3eda9366d80367f4756a2b985b8484a1699c60b3b8e3500f0",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.1",
+        "tag_object": "044fe6069ebca87afa084dcedec7d2b4e5a82c3f",
+        "commit": "b410e44c74f600394445bd9232a43af99f6fe8c5",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "c208d3379a4073c9f7c9f84b896698b97a56349380d1d9129a33e205bea02c48"
+        }
+      }
+    },
+    "0.151.0-alpha.10": {
+      "rollout_line_sha256": "f27bba7a4ca56377d2325fe1ff88aa6644cf315b68da9bd25cb8b8556e50cce2",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.10",
+        "tag_object": "98aef49186fbb6551fc24e6c13786b60387b2c39",
+        "commit": "34c5b60780d2ed7cba027cf515eab34e92ff958b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "28e6ad69911ac78c5b60d837f521573992643516c87414aa51bd40d0b8a1bb6e"
+        }
+      }
+    },
+    "0.151.0-alpha.11": {
+      "rollout_line_sha256": "f27bba7a4ca56377d2325fe1ff88aa6644cf315b68da9bd25cb8b8556e50cce2",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.11",
+        "tag_object": "335efc41a7047d40082b9da8b3cf54ecc2724cab",
+        "commit": "b8b79d3a3c7e50742de1100bb3054864b17ea1f3",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d59aee3b7b0bd1278b214a5a978cad26a8f303cd1eb405909e74be5539f45e7e"
+        }
+      }
+    },
+    "0.151.0-alpha.12": {
+      "rollout_line_sha256": "e85f4cc43774908d0667b7373264d952e0984f996bcc2439636e54c8462e3085",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.12",
+        "tag_object": "b474553a72cf2c500175bf9eecd7344f6a309935",
+        "commit": "b676b03adc50cde41bc38426a1c16d44c122f135",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "63e430b3b3f8e5f3fd7b57f641af06f33cc20f8373e9183965192efa909d73ae"
+        }
+      }
+    },
+    "0.151.0-alpha.2": {
+      "rollout_line_sha256": "942ca14a548021b3eda9366d80367f4756a2b985b8484a1699c60b3b8e3500f0",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.2",
+        "tag_object": "fd09485bd451d956008b7c6c6f3f96c8bbb3d420",
+        "commit": "7a85bd1bb4c61c211781c814596fcdeb311107fe",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "c208d3379a4073c9f7c9f84b896698b97a56349380d1d9129a33e205bea02c48"
+        }
+      }
+    },
+    "0.151.0-alpha.3": {
+      "rollout_line_sha256": "3002fc952ce75ac982b053794032a9e0cd346ba04d96e5af5e462604075f18a6",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.3",
+        "tag_object": "86bd54b6a65f5fc09e0165f7bd569c388e5ccdc2",
+        "commit": "fcaaaa6e5e43dd5e1cd04a4d53116ab31b0adaa5",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "5b70df60adedd09ee87aa3a83f443cbd81012d4a838e2d5c9a117729e2a9fcf6"
+        }
+      }
+    },
+    "0.151.0-alpha.4": {
+      "rollout_line_sha256": "c052c3da299479815cccbe6e6691ad19cf698045155c499296ae58225dde4b09",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.4",
+        "tag_object": "8eebe43294ec37ed84e566e6be347f63ceabcd9a",
+        "commit": "0dc1fd6a4c421caea9d409234d769ea097852891",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "738913ea9064b15f476869d4166d4c86e5af4909c897c727cbecd826c3ecf8ed"
+        }
+      }
+    },
+    "0.151.0-alpha.5": {
+      "rollout_line_sha256": "c052c3da299479815cccbe6e6691ad19cf698045155c499296ae58225dde4b09",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.5",
+        "tag_object": "a6af5be554f667dbf361949e5a910a1680f42aaf",
+        "commit": "e6e0c4fb8c0340800f4066c50e849149e4ecd912",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "738913ea9064b15f476869d4166d4c86e5af4909c897c727cbecd826c3ecf8ed"
+        }
+      }
+    },
+    "0.151.0-alpha.6": {
+      "rollout_line_sha256": "0aeb3ab00021532d4eaf5aaf605e74477b9d79f202b7680d64b9e75121a74f6f",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.6",
+        "tag_object": "371fb414f44ccfa321a532e292791b086bd963f1",
+        "commit": "42cd2e3425834ee77c0b76c121cd43541d69810b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "56895c586151628e8f5448e43c21f65b933d5be4bec62c8beea7d96a07b3dd42"
+        }
+      }
+    },
+    "0.151.0-alpha.7": {
+      "rollout_line_sha256": "0aeb3ab00021532d4eaf5aaf605e74477b9d79f202b7680d64b9e75121a74f6f",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.7",
+        "tag_object": "8624e940879e108e3ea89a2d18befdecf654f6d5",
+        "commit": "6f12d95fa8bd0787cf877ea36a64052a8f8d116b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "56895c586151628e8f5448e43c21f65b933d5be4bec62c8beea7d96a07b3dd42"
+        }
+      }
+    },
+    "0.151.0-alpha.7.1": {
+      "rollout_line_sha256": "0aeb3ab00021532d4eaf5aaf605e74477b9d79f202b7680d64b9e75121a74f6f",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.7.1",
+        "tag_object": "4444e006e32a4e7d42c86c6423e84f0bbaf53492",
+        "commit": "ece348ff63c2cf0922eef45fee4c487375117e57",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "56895c586151628e8f5448e43c21f65b933d5be4bec62c8beea7d96a07b3dd42"
+        }
+      }
+    },
+    "0.151.0-alpha.7.2": {
+      "rollout_line_sha256": "0aeb3ab00021532d4eaf5aaf605e74477b9d79f202b7680d64b9e75121a74f6f",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.7.2",
+        "tag_object": "f41d32030f52842d4bf7fae44551ed1c24453b47",
+        "commit": "f70e26c29ccb731e22d1104de550b1b9594d7070",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "56895c586151628e8f5448e43c21f65b933d5be4bec62c8beea7d96a07b3dd42"
+        }
+      }
+    },
+    "0.151.0-alpha.8": {
+      "rollout_line_sha256": "f27bba7a4ca56377d2325fe1ff88aa6644cf315b68da9bd25cb8b8556e50cce2",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.8",
+        "tag_object": "a6ab4f121c521f3ca161e73082e6c6aea922f8f2",
+        "commit": "a6800e6c8e2351548c62eb6d86c9af2e1ad1120b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "28e6ad69911ac78c5b60d837f521573992643516c87414aa51bd40d0b8a1bb6e"
+        }
+      }
+    },
+    "0.151.0-alpha.9": {
+      "rollout_line_sha256": "f27bba7a4ca56377d2325fe1ff88aa6644cf315b68da9bd25cb8b8556e50cce2",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.151.0-alpha.9",
+        "tag_object": "cabf6bf69cb0e6e720dc6da4925f367df76f5247",
+        "commit": "4325f6f9accd18fdd6497512a7084d974d30f72c",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "28e6ad69911ac78c5b60d837f521573992643516c87414aa51bd40d0b8a1bb6e"
+        }
+      }
+    },
+    "0.152.0": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0",
+        "tag_object": "7f6bee13af649d0da23ac0c2bf5c83f571fcd611",
+        "commit": "316795b3cf2a45e90d121d9f46499d4658b2645c",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "8f7c9fbb1b45f69f2c6cd24c655f76254fbf5727b0db608a2722ee5c9970c0d4"
+        }
+      }
+    },
+    "0.152.0-alpha.1": {
+      "rollout_line_sha256": "a6489a9525ce9088ccab3e779dab5b82a11ef708c08b515b9bc2b9ece03d053f",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.1",
+        "tag_object": "757a7d182207d78dd1ed582062b41de381f33bb5",
+        "commit": "6d123b7e98b045f2796cb196e719b96a43d39a7a",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "47be82c21b5300ab948a8ab9f60749df56e0c06660c1d5b1056131cd723110fc"
+        }
+      }
+    },
+    "0.152.0-alpha.2": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.2",
+        "tag_object": "5bb28a059d215dc4f3409d10b33804d897852a0f",
+        "commit": "c49f76fe98c5f0560a51c681286c08f723c6aa0d",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d78ff4a8612c159345c11255e9f4860f7023cff70c33fc5b9d5eca1ae2e9788d"
+        }
+      }
+    },
+    "0.152.0-alpha.3": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.3",
+        "tag_object": "657154782a0e48f59db6462f2df14e42777c9727",
+        "commit": "87dfe39bae6ce7dda3818168842a230c869c05c5",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d78ff4a8612c159345c11255e9f4860f7023cff70c33fc5b9d5eca1ae2e9788d"
+        }
+      }
+    },
+    "0.152.0-alpha.4": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.4",
+        "tag_object": "cab88dccc2514eb6e19b47a9fba9486434da55ca",
+        "commit": "7ac2dff554323b17d5f622b7aca236ca75c93259",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d78ff4a8612c159345c11255e9f4860f7023cff70c33fc5b9d5eca1ae2e9788d"
+        }
+      }
+    },
+    "0.152.0-alpha.5": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.5",
+        "tag_object": "a153a56998c70d5ec6dd3b61fa5c8f21ecfc5685",
+        "commit": "949272839fba70210075facf5bb08fd7999a61ac",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "d78ff4a8612c159345c11255e9f4860f7023cff70c33fc5b9d5eca1ae2e9788d"
+        }
+      }
+    },
+    "0.152.0-alpha.6": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.6",
+        "tag_object": "552dbab3616ea4ff1ab0b628059d75490bb4abcb",
+        "commit": "d2a6bad21bbda8098520f5605ba523758ff10e94",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "8f7c9fbb1b45f69f2c6cd24c655f76254fbf5727b0db608a2722ee5c9970c0d4"
+        }
+      }
+    },
+    "0.152.0-alpha.7": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.7",
+        "tag_object": "2e6cc9b757e0442fe03f514147f267d964582bee",
+        "commit": "a43ad35f9a273e3890593c54a157d286c7de9c4b",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "8f7c9fbb1b45f69f2c6cd24c655f76254fbf5727b0db608a2722ee5c9970c0d4"
+        }
+      }
+    },
+    "0.152.0-alpha.7.1": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.7.1",
+        "tag_object": "ab13d80dc891d56a48944e73cfab076a1ca3f9fd",
+        "commit": "79388efe32582718fd9102b0eede199473129604",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "8f7c9fbb1b45f69f2c6cd24c655f76254fbf5727b0db608a2722ee5c9970c0d4"
+        }
+      }
+    },
+    "0.152.0-alpha.7.2": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.0-alpha.7.2",
+        "tag_object": "8aafdc4a83be6995dfb6dbf6b8e44330f6153015",
+        "commit": "d6b6badf5b71f341676bb5e4fcbfbe3bec1a0722",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "8f7c9fbb1b45f69f2c6cd24c655f76254fbf5727b0db608a2722ee5c9970c0d4"
+        }
+      }
+    },
+    "0.152.1": {
+      "rollout_line_sha256": "301197629ee7040be4f8361b503977761eee7c56a5a06788df16d3d8e8a0e5d4",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.152.1",
+        "tag_object": "3c6cfbab81e44218c729dc8c6b304cb760d1b8a1",
+        "commit": "5adb68a49933ae446bf11935662c83dba55a0804",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "8f7c9fbb1b45f69f2c6cd24c655f76254fbf5727b0db608a2722ee5c9970c0d4"
+        }
+      }
+    },
+    "0.153.0": {
+      "rollout_line_sha256": "edfb1d10b777cdc144f170317a3b8b89943e6be589a4a1664657b7dfecb19305",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0",
+        "tag_object": "6bc50f104dcc0192e696cdeae721dfc19b507391",
+        "commit": "41e22fee981a63b3698df7ed36bad393cda24715",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "90cc88760f6b43c84d1266f5ddd6791d1e6971e7c402f591883aa85c7b406a28"
+        }
+      }
+    },
+    "0.153.0-alpha.1": {
+      "rollout_line_sha256": "31e106a8d7c0c7b3d9fce7fef17f6a6b7869d5bdb4349be131c192e3f8bc7a73",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.1",
+        "tag_object": "5c6ff4778720d48159a37f058da09a00d58f727e",
+        "commit": "f2802f5e1e7981187122cb0953d455e8ddb9deab",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "39fac06f190cb2e5c179c710e9cf1c8d7afd8c3cf6310293f6f8fad7debd0e3a"
+        }
+      }
+    },
+    "0.153.0-alpha.2": {
+      "rollout_line_sha256": "f673bbbf95ea407e33452aa07aac10434c10dbd842a3b383e9c25b030f012e82",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.2",
+        "tag_object": "911237afc7e102adfd13167cfe69743f97df8125",
+        "commit": "73919571da608749b867134722fe3b42c1c6097f",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "297b6e366680f8a96b440f2b6d7a7ea8e1c6696d22de0d6e0ee2ac55e0ed012d"
+        }
+      }
+    },
+    "0.153.0-alpha.3": {
+      "rollout_line_sha256": "9bcc178c33e5c068fa18b4a72e15a578ae194d975faef23f1fd10ab2f7d19c79",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.3",
+        "tag_object": "ec218e22e76649d7e419c138da528156142b5185",
+        "commit": "1969b872748e2d185f425c9ab22462f9a1c3458d",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "1f05c151f6c59265c5361ac15fe3ce92679d7e2e3620e6147c39f706afff8ae0"
+        }
+      }
+    },
+    "0.153.0-alpha.4": {
+      "rollout_line_sha256": "9bcc178c33e5c068fa18b4a72e15a578ae194d975faef23f1fd10ab2f7d19c79",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.4",
+        "tag_object": "767248f1c50b650dbfca7b121bccb4110d00c891",
+        "commit": "c7348a8ffb32269e147817ad61918278401fb474",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "1f05c151f6c59265c5361ac15fe3ce92679d7e2e3620e6147c39f706afff8ae0"
+        }
+      }
+    },
+    "0.153.0-alpha.5": {
+      "rollout_line_sha256": "edfb1d10b777cdc144f170317a3b8b89943e6be589a4a1664657b7dfecb19305",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.5",
+        "tag_object": "f704d08482d0ed76e468f899ebdd5751dc96e5b8",
+        "commit": "522396ba0e838e43749ffd01c661fd4aa190e00e",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "90cc88760f6b43c84d1266f5ddd6791d1e6971e7c402f591883aa85c7b406a28"
+        }
+      }
+    },
+    "0.153.0-alpha.5.1": {
+      "rollout_line_sha256": "edfb1d10b777cdc144f170317a3b8b89943e6be589a4a1664657b7dfecb19305",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.5.1",
+        "tag_object": "ac9652029c7a9da8b3c1a4cd40715779a3ad2402",
+        "commit": "bdd2a5f827494b6e916ca8c3e887c340580a41e6",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "90cc88760f6b43c84d1266f5ddd6791d1e6971e7c402f591883aa85c7b406a28"
+        }
+      }
+    },
+    "0.153.0-alpha.6": {
+      "rollout_line_sha256": "edfb1d10b777cdc144f170317a3b8b89943e6be589a4a1664657b7dfecb19305",
+      "provenance": {
+        "kind": "official-release-export",
+        "repository": "https://github.com/openai/codex",
+        "tag": "rust-v0.153.0-alpha.6",
+        "tag_object": "22a9fdf5f01d606eff192aacb93bc3107688450f",
+        "commit": "e8b3253fed5aeef7e914441bc3b73b3b0a718b51",
+        "source": {
+          "path": "codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst",
+          "sha256": "90cc88760f6b43c84d1266f5ddd6791d1e6971e7c402f591883aa85c7b406a28"
+        }
+      }
+    }
+  }
+}

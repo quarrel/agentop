@@ -1,16 +1,19 @@
 mod model;
 mod rollout;
 mod schema;
+mod schema_sync;
 mod ui;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(about = "Read-only live observer for Codex multi-agent rollouts")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long)]
     sessions_dir: Option<PathBuf>,
     #[arg(long)]
@@ -18,6 +21,16 @@ struct Args {
     /// Colour output mode
     #[arg(long, value_enum, default_value_t = ui::ColorMode::Auto)]
     color: ui::ColorMode,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Fetch and catalogue RolloutLine schemas from new official Codex releases
+    BuildSchema {
+        /// Catalogue directory (defaults to AGENTOP_SCHEMA_DIR or the XDG data directory)
+        #[arg(long)]
+        catalogue_dir: Option<PathBuf>,
+    },
 }
 
 fn sessions_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -42,7 +55,7 @@ fn open_selected_reader(
     discovery: rollout::Discovery,
     requested: &str,
     dir: PathBuf,
-    cwd: PathBuf,
+    catalogue_dir: PathBuf,
 ) -> Result<rollout::SelectedReader> {
     let rollout::Discovery {
         admitted,
@@ -51,22 +64,48 @@ fn open_selected_reader(
     } = discovery;
     let groups = rollout::group(admitted);
     let selected = rollout::select(&groups, Some(requested))?.clone();
-    rollout::SelectedReader::new(selected, pending, dir, cwd)
+    rollout::SelectedReader::new(selected, pending, dir, catalogue_dir)
 }
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let dir = sessions_dir(args.sessions_dir)?;
-    let cwd = std::env::current_dir().context("resolve current working directory")?;
+    if let Some(Command::BuildSchema { catalogue_dir }) = args.command {
+        let catalogue_dir = catalogue_dir.map_or_else(schema::default_catalogue_dir, Ok)?;
+        let report = schema_sync::build_schema(&catalogue_dir)?;
+        if report.imported.is_empty() {
+            println!(
+                "Schema catalogue is current: {} official tags mapped",
+                report.official_tags
+            );
+        } else {
+            for item in &report.imported {
+                println!(
+                    "{} -> {}{}",
+                    item.version,
+                    item.rollout_line_sha256,
+                    if item.new_family { " (new family)" } else { "" }
+                );
+            }
+            println!(
+                "Imported {} versions from {} official tags into {}",
+                report.imported.len(),
+                report.official_tags,
+                catalogue_dir.display()
+            );
+        }
+        return Ok(());
+    }
 
+    let dir = sessions_dir(args.sessions_dir)?;
+    let catalogue_dir = schema::default_catalogue_dir()?;
     require_terminal()?;
     if let Some(requested) = args.session.as_deref() {
         let discovery = rollout::discover(&dir)
             .with_context(|| format!("discover sessions under {}", dir.display()))?;
-        let mut reader = open_selected_reader(discovery, requested, dir, cwd)?;
+        let mut reader = open_selected_reader(discovery, requested, dir, catalogue_dir)?;
         ui::run(&mut reader, args.color)
     } else {
-        ui::run_browser(dir, cwd, args.color)
+        ui::run_browser(dir, catalogue_dir, args.color)
     }
 }
 
@@ -87,6 +126,7 @@ mod tests {
     #[test]
     fn color_cli_accepts_exact_values_and_defaults_to_auto() {
         let default = Args::try_parse_from(["agentop"]).unwrap();
+        assert!(default.command.is_none());
         assert_eq!(default.color, ui::ColorMode::Auto);
         assert_eq!(
             Args::try_parse_from(["agentop", "--color=auto"])
@@ -101,7 +141,19 @@ mod tests {
             ui::ColorMode::None
         );
         assert!(Args::try_parse_from(["agentop", "--color=always"]).is_err());
-
+        assert!(matches!(
+            Args::try_parse_from([
+                "agentop",
+                "build-schema",
+                "--catalogue-dir",
+                "/tmp/catalogue"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::BuildSchema {
+                catalogue_dir: Some(_)
+            })
+        ));
         let mut help = Vec::new();
         Args::command().write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();

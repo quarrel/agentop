@@ -52,71 +52,57 @@ Observed 0.152.1 rollouts already provide most of the data needed:
 - Parent/child task envelopes reveal sender, recipient, and message type, but v2 task payloads can be `encrypted_content`. Do not try to decrypt them.
 - Final agent results are often plaintext and can contain useful compact receipts such as `status=READY_FOR_ACCEPTANCE`, `status=BLOCKED`, validation results, blockers, and candidate identity.
 
-No generated schema is a public stability guarantee. Use the exact internal schema captured from each available Codex version to describe permitted shapes, and use small real-rollout fixtures to establish observed sequencing and reducer semantics. The runtime parser must remain tolerant of absent fields, additional fields, and unknown variants.
+No generated schema is a public stability guarantee. Use the exact internal schema family mapped from each catalogued Codex version to describe permitted shapes, and use small real-rollout fixtures to establish observed sequencing and reducer semantics. The runtime parser must remain tolerant of absent fields, additional fields, and unknown variants.
 
-## Schema capture and compatibility
+## Schema catalogue and compatibility
 
-The [official Codex App Server documentation](https://developers.openai.com/codex/app-server/#message-schema) states that generated schema artefacts are specific to the Codex version that produced them. It distinguishes the default stable API surface from the additional experimental surface. The installed 0.152.1 CLI also provides an internal-schema generator for persisted rollout types.
+Agentop directly uses only Codex's self-contained internal `RolloutLine.json` schema. The stable and experimental app-server surfaces are outside this POC and are not archived. Generated schemas remain version-specific evidence rather than public stability guarantees.
 
-For each newly installed Codex version worth cataloguing, capture all three useful surfaces:
-
-```bash
-codex --version
-codex app-server generate-json-schema --out ./schemas/staging/app-server/stable
-codex app-server generate-json-schema --experimental --out ./schemas/staging/app-server/experimental
-codex app-server generate-internal-json-schema --out ./schemas/staging/internal
-```
-
-The surfaces have distinct purposes:
-
-- `app-server/stable` describes the default stable app-server protocol surface produced by that CLI.
-- `app-server/experimental` includes experimental app-server methods and fields and is useful for preparing future features.
-- `internal` describes persisted/internal structures; in 0.152.1 it includes `RolloutLine.json`, which is the directly relevant schema for this POC.
-
-Store captures by exact producer version:
+Store the catalogue by canonical schema identity:
 
 ```text
-schemas/codex/
-  0.152.1/
-    manifest.json
-    app-server/
-      stable/
-      experimental/
-    internal/
+schemas/codex/rollout-line/
+  versions.json
+  by-hash/
+    <canonical-sha256>/
       RolloutLine.json
 ```
 
-A capture operation should:
+`versions.json` maps each exact `session_meta.payload.cli_version` to a full canonical SHA-256 plus immutable source provenance: official repository, `rust-v*` tag, tag object, peeled commit, stable export path, and compressed source hash. Deterministically canonicalise JSON objects, retain array order, add one trailing newline, and hash those exact bytes. Equal hashes share a single schema file. Require every `$ref` to remain local to that file.
 
-1. read and retain the raw `codex --version` output;
-2. parse the exact producer `cli_version` from that output and require it to match the archive-directory key used by rollout lookup;
-3. create a fresh, empty staging directory so files from an earlier generator run cannot enter the capture;
-4. generate all three surfaces into that staging directory;
-5. read the version again and reject the capture if either the raw output or parsed version changed;
-6. verify that every output is valid JSON Schema and that the internal bundle contains the expected rollout schema;
-7. hash every generated file;
-8. record the raw version output, parsed `cli_version`, commands, arguments, output filenames, and hashes in `manifest.json`; and
-9. atomically publish the completed capture under `schemas/codex/<cli_version>/`. If that target already exists, verify that it is identical or fail rather than overwriting it.
+The checked-in mapping is compiled into each Agentop binary as its read-only seed. Later official releases are an explicit maintenance operation, never an automatic TUI side effect:
 
-The manifest's parsed `cli_version` and archive directory name must exactly match `session_meta.payload.cli_version`; for example, raw output such as `codex-cli 0.152.1` maps to the lookup key `0.152.1`. Preserve generated files unchanged. Do not store local configuration contents or secrets in the manifest. Never generate with the current binary and label the output as belonging to an older version; acquire and run the exact historical binary when possible. Failure to acquire every historical schema must not block best-effort ingestion.
+```bash
+agentop build-schema
+```
 
-Use the archive in two ways:
+The updater should:
 
-- Compare `stable` with `experimental` within one version to see forthcoming app-server features.
-- Compare each surface across versions to identify additions, removals, and changed definitions.
+1. enumerate official `rust-v*` tag refs from `0.149.0-alpha.1` onwards and parse exact SemVer versions;
+2. compare all remote refs with the merged built-in/user catalogue, so late older tags are not missed;
+3. reject a known version whose tag object conflicts with recorded provenance;
+4. resolve annotated or lightweight tags to an immutable commit;
+5. download only the stable precomputed export at that exact commit;
+6. bound compressed and decompressed input, then extract only `internal_json_schema["RolloutLine.json"]`;
+7. validate, canonicalise, hash, and deduplicate the schema;
+8. stage new families without replacing existing content;
+9. publish the complete version mapping last under an advisory lock; and
+10. leave the installed catalogue unchanged if any fetch, validation, provenance, or publication step fails.
+
+Use an XDG user-data overlay for releases newer than the binary's seed, with an explicit directory override for tests and maintainers. External entries may add versions or repeat identical built-in mappings, but must never override a built-in version with a different hash. Optional GitHub credentials come from environment variables and are sent only to the API host. Normal TUI startup remains offline and read-only.
 
 Do not generate a separate Rust model from every schema and do not validate every JSONL record against JSON Schema in the live rendering loop. Use schemas for provenance, offline compatibility analysis, fixture selection, and exact-version diagnostics. Keep runtime parsing as a small tolerant normaliser.
 
 Define compatibility claims precisely:
 
-- **Catalogued:** an exact schema capture is archived.
+- **Catalogued:** the exact producer version maps through verified provenance to a stored or embedded RolloutLine family hash.
 - **Ingestable:** Agentop can discover, group, and tail the rollout without crashing; unknown data is reported.
 - **Semantically covered:** fixtures demonstrate correct topology, lifecycle, and activity reduction.
 - **Live verified:** Agentop has been exercised against a running process of that exact version.
 
-Cataloguing is orthogonal to runtime compatibility: an exact schema may be archived before Agentop has semantic fixtures for it, and a rollout may be ingestable even when its exact schema is missing.
+Cataloguing is orthogonal to runtime compatibility: an exact schema may be archived before Agentop has semantic fixtures for it, and a rollout may be ingestable even when its exact version is absent from the catalogue.
 
-Select schemas only by exact `session_meta.payload.cli_version`. Never validate with the “nearest” schema. When no exact capture exists, continue with tolerant envelope parsing, show that schema coverage is missing, and retain enough type/version diagnostics to guide the next compatibility improvement.
+Select schemas only by exact `session_meta.payload.cli_version`. Never validate with the nearest schema. When no exact mapping exists, continue with tolerant envelope parsing, show that schema coverage is missing, and retain enough type/version diagnostics to guide the next compatibility improvement.
 
 ## Deliberate POC boundaries
 
@@ -258,7 +244,7 @@ Assign `InFlightCall.sequence` when a call record is reduced and increment `next
 
 A diagnostic sample must remain actionable even when malformed JSON provides neither a producer version nor an ordinal. Its rollout path and byte offset identify the input; `kind` and `detail` stay bounded and sanitised.
 
-The row status is the latest turn's lifecycle, not an irreversible status for the agent thread. A new `task_started` on an existing thread replaces `latest_turn` and clears prior in-flight calls, messages, reasoning, final text, and result claims. Bounded per-turn history can be added later if actual use warrants it; the POC must not display an earlier turn's result as though it belonged to the active turn.
+The row status is the latest turn's lifecycle, not an irreversible status for the agent thread. A new `task_started` on an existing thread replaces `latest_turn` and clears prior in-flight calls, messages, reasoning, final text, and result claims. Separately retain a bounded chronological interaction history of sanitised lifecycle, message, reasoning, tool-boundary, and communication summaries across turns. Never retain tool inputs or outputs in that history. Historical entries must remain confined to the explicit interaction view and must not be displayed as though they belonged to the active turn.
 
 Keep status semantics conservative. If the rollout only tells us an agent is running and it has been quiet for a long time, display `RUNNING · last activity 2h ago`; do not infer `STALLED` or `BLOCKED` from silence.
 
@@ -793,7 +779,8 @@ A handful of unit tests and tiny fixtures should cover:
 23. selected-session health excluding archive-wide discovery diagnostics from unrelated rollouts;
 24. exact colour-mode CLI values/help, representative semantic colour use, and colour-free picker/tree/tiny rendering that retains non-colour selection cues;
 25. exact newest-running in-flight `wait_agent` precedence in tree and detail status, including clearing on completion, a newer non-wait call taking precedence, preserved activity text, and message text alone not being lifecycle evidence; and
-26. a root-only selected-reader constructor followed by progressive deterministic parent-first admission, same-poll completion of many tiny rollout snapshots, separately bounded bulk initial catch-up, preserved steady-state byte/work limits including charged admission and completion, live-tail and pending-child fairness during saturated initial catch-up, linear JSONL buffer consumption, eventual full-load state/cursor/health equivalence, a truthful loading indicator, stable selection as agents appear and reorder, and deterministic loading/steady deadline timing helpers.
+26. a root-only selected-reader constructor followed by progressive deterministic parent-first admission, same-poll completion of many tiny rollout snapshots, separately bounded bulk initial catch-up, preserved steady-state byte/work limits including charged admission and completion, live-tail and pending-child fairness during saturated initial catch-up, linear JSONL buffer consumption, eventual full-load state/cursor/health equivalence, a truthful loading indicator, stable selection as agents appear and reorder, and deterministic loading/steady deadline timing helpers; and
+27. exact-version content-addressed schema lookup, embedded/user catalogue conflict rejection, self-contained schema and hash validation, release-export extraction, tag/provenance validation, family deduplication, idempotent synchronisation, and failure-atomic publication.
 
 Do not vendor entire real rollout files. Minimise representative lines into small, sanitised fixtures or inline JSON test data. Keep provenance outside fixture payloads: record which exact producer version and schema informed each fixture.
 

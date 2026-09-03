@@ -24,21 +24,27 @@ cargo test
 
 For a live smoke test, confirm the picker navigates, refreshes, opens a tree, and returns with Esc while the sessions tree remains byte-for-byte unchanged. Session opening should render the root promptly, show `loading history…` while existing history is reduced, and then clear that indicator truthfully. Each initial catch-up poll uses a separate bounded 8 MiB/65,536-record allowance while preserving the ordinary 256 KiB/2,048-work reserve for discovery, live tails, and pending children. The event loop groups successive bounded polls into an approximately 100 ms loading work window, checks for terminal input between polls, then redraws; a slow individual poll remains singly bounded, and saturated windows continue without an artificial sleep. JSONL chunks are consumed with one buffer compaction rather than shifting the remaining buffer after every record. Ordinary live polling settles to about one second without busy-spinning. Exceptional file truncation may synchronously rebuild the selected group. Also confirm tree navigation remains responsive while files grow, new child rollouts appear, the catching-up indicator is visible during updates, `WAITING ON AGENT ↓` appears only for a running agent whose newest unfinished exact tool call is `wait_agent`, resize and tiny-terminal views remain usable, and q/Esc restores the cursor, alternate screen, and normal terminal input. Exercise an error after terminal activation with a temporary fixture; the RAII guard must restore the terminal.
 
-## Codex updates and schema capture
+## Codex updates and schema catalogue
 
-Generated schema bundles are specific to their producing Codex CLI version. Capture all three surfaces using the repository script:
+Agentop consumes only the self-contained internal `RolloutLine.json` schema. It does not archive the unused stable or experimental app-server schema surfaces. Official versions map to canonical RolloutLine hashes, and identical schemas are stored once under `schemas/codex/rollout-line/by-hash/`.
 
-```bash
-scripts/capture-codex-schemas.sh
-```
-
-The historical importer is a no-argument, provenance-pinned workflow for exact Codex CLI version `0.149.0-alpha.4.1` only:
+The checked-in `versions.json` is compiled into Agentop as its read-only seed. An installed binary can extend that seed into its user catalogue without a shell toolchain:
 
 ```bash
-scripts/import-codex-release-schemas.sh
+agentop build-schema
 ```
 
-These workflows enforce exact version identity, fresh staging, JSON validation, hashes, and collision-safe publication beneath `schemas/`. Never generate with the current binary and label the output as historical. Catalogue status is separate from ingestable, semantically covered, and live-verified compatibility evidence.
+The command enumerates official `rust-v*` GitHub tag refs at or after `0.149.0-alpha.1`, subtracts exact versions already mapped, resolves immutable tag and commit provenance, downloads each missing stable precomputed export at that commit, and extracts only `internal_json_schema["RolloutLine.json"]`. It validates self-contained JSON Schema references, canonicalises and hashes the result, deduplicates equal families, and publishes families before the mapping under an advisory lock. Existing version conflicts and moved tag objects are errors; a failed run leaves the previous mapping intact.
+
+The default writable catalogue is `$XDG_DATA_HOME/agentop/schemas/codex/rollout-line`, falling back to `$HOME/.local/share/agentop/schemas/codex/rollout-line`. `AGENTOP_SCHEMA_DIR` or `--catalogue-dir` supplies an exact override. Set `GH_TOKEN` or `GITHUB_TOKEN` only through the environment when authenticated GitHub API access is needed. Tokens are sent to the API host and not to the raw-content host.
+
+Maintainers refresh the checked-in seed with:
+
+```bash
+cargo run -- build-schema --catalogue-dir schemas/codex/rollout-line
+```
+
+Review all resulting provenance and schema-family changes before committing. Catalogue status remains separate from ingestable, semantically covered, and live-verified compatibility evidence. Normal TUI operation performs no network access and never updates the catalogue.
 
 ## Fixture and privacy rules
 
