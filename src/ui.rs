@@ -1,6 +1,6 @@
 use crate::model::{
     AgentInteraction, AgentState, CoverageLevel, DataHealth, InteractionKind, SessionState,
-    TurnStatus,
+    ToolInteractionState, TurnStatus,
 };
 use crate::rollout::{self, Discovery, PollOutcome, SelectedReader, SessionGroup};
 use anyhow::{Context, Result};
@@ -31,6 +31,7 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
 const INITIAL_LOADING_WORK_WINDOW: Duration = Duration::from_millis(100);
 const RENDER_TEXT_LIMIT: usize = 256;
+const STALE_AFTER_SESSION_PROGRESS_SECONDS: i64 = 2 * 60 * 60;
 const _: fn(&SessionGroup, &SessionState) -> Vec<String> = crate::rollout::tree_lines;
 
 fn update_interval(loading: bool) -> Duration {
@@ -894,11 +895,12 @@ fn draw(
         chunks[0],
     );
 
+    let stale_reference = stale_reference_for_display(state, loading, ui.catching_up);
     let items = rows
         .iter()
         .map(|row| {
             let agent = &state.agents[&row.thread_id];
-            ListItem::new(tree_line(row, agent, palette))
+            ListItem::new(tree_line(row, agent, stale_reference, palette))
         })
         .collect::<Vec<_>>();
     let mut list_state = ListState::default();
@@ -927,15 +929,21 @@ fn draw(
         .as_ref()
         .and_then(|id| state.agents.get(id));
     frame.render_widget(
-        Paragraph::new(detail_lines(selected, state, group, palette))
-            .block(
-                Block::default()
-                    .title(" details ")
-                    .title_style(palette.title())
-                    .borders(Borders::ALL)
-                    .border_style(palette.title()),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(detail_lines(
+            selected,
+            state,
+            group,
+            stale_reference,
+            palette,
+        ))
+        .block(
+            Block::default()
+                .title(" details ")
+                .title_style(palette.title())
+                .borders(Borders::ALL)
+                .border_style(palette.title()),
+        )
+        .wrap(Wrap { trim: false }),
         chunks[2],
     );
     frame.render_widget(
@@ -967,11 +975,64 @@ fn interaction_style(kind: InteractionKind, palette: Palette) -> Style {
     }
 }
 
-fn interaction_line(interaction: &AgentInteraction, palette: Palette) -> Line<'static> {
+fn elapsed(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+    let milliseconds = end.signed_duration_since(start).num_milliseconds().max(0);
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else {
+        let seconds = milliseconds / 1_000;
+        if seconds < 60 {
+            format!("{}.{:01}s", seconds, (milliseconds % 1_000) / 100)
+        } else if seconds < 3_600 {
+            format!("{}m {}s", seconds / 60, seconds % 60)
+        } else if seconds < 86_400 {
+            format!("{}h {}m", seconds / 3_600, (seconds % 3_600) / 60)
+        } else {
+            format!("{}d {}h", seconds / 86_400, (seconds % 86_400) / 3_600)
+        }
+    }
+}
+
+fn tool_state_text(interaction: &AgentInteraction, now: DateTime<Utc>) -> Option<String> {
+    let state = interaction.tool_state?;
+    let duration = match state {
+        ToolInteractionState::Open => interaction.timestamp.map(|started| elapsed(started, now)),
+        ToolInteractionState::Returned | ToolInteractionState::EndedWithoutReturn => interaction
+            .timestamp
+            .zip(interaction.finished_at)
+            .map(|(started, finished)| elapsed(started, finished)),
+    };
+    Some(match (state, duration) {
+        (ToolInteractionState::Open, Some(duration)) => format!("open for {duration}"),
+        (ToolInteractionState::Open, None) => "open".into(),
+        (ToolInteractionState::Returned, Some(duration)) => {
+            format!("returned after {duration}")
+        }
+        (ToolInteractionState::Returned, None) => "returned".into(),
+        (ToolInteractionState::EndedWithoutReturn, Some(duration)) => {
+            format!("ended without return after {duration}")
+        }
+        (ToolInteractionState::EndedWithoutReturn, None) => "ended without return".into(),
+    })
+}
+
+fn tool_state_style(state: ToolInteractionState, palette: Palette) -> Style {
+    match state {
+        ToolInteractionState::Open => palette.warning(),
+        ToolInteractionState::Returned => palette.good(),
+        ToolInteractionState::EndedWithoutReturn => palette.error(),
+    }
+}
+
+fn interaction_line(
+    interaction: &AgentInteraction,
+    now: DateTime<Utc>,
+    palette: Palette,
+) -> Line<'static> {
     let mut spans = Vec::new();
     if let Some(timestamp) = interaction.timestamp {
         spans.push(Span::styled(
-            format!("{}  ", timestamp.to_rfc3339()),
+            format!("{}  ", utc_date_time(timestamp)),
             palette.metadata(),
         ));
     } else if let Some(ordinal) = interaction.ordinal {
@@ -985,12 +1046,19 @@ fn interaction_line(interaction: &AgentInteraction, palette: Palette) -> Line<'s
         interaction_style(interaction.kind, palette),
     ));
     spans.push(Span::raw(render_text(&interaction.summary)));
+    if let (Some(state), Some(state_text)) =
+        (interaction.tool_state, tool_state_text(interaction, now))
+    {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::styled(state_text, tool_state_style(state, palette)));
+    }
     Line::from(spans)
 }
 
 fn interaction_detail_lines(
     interaction: Option<(&AgentInteraction, usize)>,
     total: usize,
+    now: DateTime<Utc>,
     palette: Palette,
 ) -> Vec<Line<'static>> {
     let Some((interaction, index)) = interaction else {
@@ -1000,18 +1068,84 @@ fn interaction_detail_lines(
         labelled_line("position", format!("{}/{}", index + 1, total), palette),
         labelled_line("type", interaction_kind(interaction.kind).into(), palette),
     ];
-    if let Some(timestamp) = interaction.timestamp {
-        lines.push(labelled_line("timestamp", timestamp.to_rfc3339(), palette));
+    if interaction.kind == InteractionKind::Tool {
+        lines.push(labelled_line(
+            "tool",
+            render_text(&interaction.summary),
+            palette,
+        ));
+        if let Some(state_text) = tool_state_text(interaction, now) {
+            lines.push(labelled_line("state", state_text, palette));
+        }
+        if let Some(timestamp) = interaction.timestamp {
+            lines.push(labelled_line("started", timestamp.to_rfc3339(), palette));
+        }
+        if let Some(finished_at) = interaction.finished_at {
+            lines.push(labelled_line("returned", finished_at.to_rfc3339(), palette));
+        }
+    } else {
+        if let Some(timestamp) = interaction.timestamp {
+            lines.push(labelled_line("timestamp", timestamp.to_rfc3339(), palette));
+        }
+        lines.push(labelled_line(
+            "content",
+            render_text(&interaction.summary),
+            palette,
+        ));
     }
     if let Some(ordinal) = interaction.ordinal {
         lines.push(labelled_line("ordinal", ordinal.to_string(), palette));
     }
-    lines.push(labelled_line(
-        "content",
-        render_text(&interaction.summary),
-        palette,
-    ));
     lines
+}
+
+fn history_header(
+    agent: &AgentState,
+    retained: usize,
+    progress: &str,
+    stale_reference: Option<DateTime<Utc>>,
+    palette: Palette,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("agentop · interactions · ", palette.title()),
+        Span::styled(render_text(agent_label(agent)), palette.title()),
+    ];
+    let role = agent
+        .agent_role
+        .as_deref()
+        .or_else(|| agent.parent_thread_id.is_none().then_some("orchestrator"));
+    for (value, style) in [
+        (role, palette.role()),
+        (agent.model.as_deref(), palette.model()),
+        (
+            agent.reasoning_effort.as_deref(),
+            palette.reasoning_effort(),
+        ),
+    ] {
+        if let Some(value) = value {
+            spans.push(Span::raw(" · "));
+            spans.push(Span::styled(render_text(value), style));
+        }
+    }
+    spans.push(Span::raw(" · "));
+    spans.push(Span::styled(
+        lifecycle_status(agent, stale_reference),
+        lifecycle_style(agent, stale_reference, palette),
+    ));
+    if let Some(last_activity_at) = agent.last_activity_at {
+        spans.push(Span::styled(
+            format!(" · activity {}", age(last_activity_at)),
+            palette.metadata(),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(" · {retained} retained"),
+        palette.metadata(),
+    ));
+    if !progress.is_empty() {
+        spans.push(Span::styled(progress.to_owned(), palette.warning()));
+    }
+    Line::from(spans)
 }
 
 fn draw_history(
@@ -1043,18 +1177,15 @@ fn draw_history(
     } else {
         ""
     };
+    let stale_reference = stale_reference_for_display(state, loading, catching_up);
     frame.render_widget(
-        Paragraph::new(format!(
-            "agentop · interactions · {} · {} retained{}",
-            render_text(agent_label(agent)),
+        Paragraph::new(history_header(
+            agent,
             agent.interactions.len(),
             progress,
+            stale_reference,
+            palette,
         ))
-        .style(if loading || catching_up {
-            palette.warning()
-        } else {
-            palette.title()
-        })
         .block(
             Block::default()
                 .borders(Borders::BOTTOM)
@@ -1063,10 +1194,11 @@ fn draw_history(
         chunks[0],
     );
 
+    let now = Utc::now();
     let items = agent
         .interactions
         .iter()
-        .map(|interaction| ListItem::new(interaction_line(interaction, palette)))
+        .map(|interaction| ListItem::new(interaction_line(interaction, now, palette)))
         .collect::<Vec<_>>();
     let selected_index = history.selected_sequence.and_then(|sequence| {
         agent
@@ -1080,7 +1212,7 @@ fn draw_history(
         List::new(items)
             .block(
                 Block::default()
-                    .title(" interactions · oldest → newest ")
+                    .title(" interactions · UTC · oldest → newest ")
                     .title_style(palette.title())
                     .borders(Borders::ALL)
                     .border_style(palette.title()),
@@ -1101,6 +1233,7 @@ fn draw_history(
         Paragraph::new(interaction_detail_lines(
             selected,
             agent.interactions.len(),
+            now,
             palette,
         ))
         .block(
@@ -1119,15 +1252,15 @@ fn draw_history(
     );
 }
 
-fn tree_line(row: &TreeRow, agent: &AgentState, palette: Palette) -> Line<'static> {
+fn tree_line(
+    row: &TreeRow,
+    agent: &AgentState,
+    stale_reference: Option<DateTime<Utc>>,
+    palette: Palette,
+) -> Line<'static> {
     let label = render_text(agent_label(agent));
-    let status = lifecycle_status(agent);
-    let status_style = match agent.latest_turn.status {
-        TurnStatus::Completed => palette.good(),
-        TurnStatus::Interrupted | TurnStatus::Errored => palette.error(),
-        TurnStatus::Pending => palette.warning(),
-        TurnStatus::Running => palette.title(),
-    };
+    let status = lifecycle_status(agent, stale_reference);
+    let status_style = lifecycle_style(agent, stale_reference, palette);
     let branch = agent.parent_thread_id.as_ref().map_or("", |_| "↪ ");
     let mut spans = vec![Span::raw(format!(
         "{}{branch}{label}  ",
@@ -1180,6 +1313,7 @@ fn detail_lines(
     agent: Option<&AgentState>,
     state: &SessionState,
     group: &SessionGroup,
+    stale_reference: Option<DateTime<Utc>>,
     palette: Palette,
 ) -> Vec<Line<'static>> {
     let Some(agent) = agent else {
@@ -1236,7 +1370,8 @@ fn detail_lines(
     }
     lines.push(Line::from(metadata_spans));
 
-    let mut lifecycle = vec![lifecycle_status(agent).to_owned()];
+    let stale = stale_running_agent(agent, stale_reference);
+    let mut lifecycle = vec![lifecycle_status(agent, stale_reference).to_owned()];
     if let Some(turn_id) = agent.latest_turn.turn_id.as_deref() {
         lifecycle.push(format!("turn {}", render_text(turn_id)));
     }
@@ -1253,6 +1388,15 @@ fn detail_lines(
         lifecycle.push(format!("last activity {}", timestamp(Some(last_activity))));
     }
     lines.push(labelled_line("lifecycle", lifecycle.join(" · "), palette));
+    if stale {
+        lines.push(Line::from(vec![
+            Span::styled("stale: ", palette.title()),
+            Span::styled(
+                "session activity continued for at least 2h after this agent's last activity; completion unknown",
+                palette.warning(),
+            ),
+        ]));
+    }
 
     let message = agent.last_message.as_deref();
     let final_message = agent.final_message.as_deref();
@@ -1291,7 +1435,7 @@ fn detail_lines(
     }
     if let Some(claim) = agent.result_status_claim.as_deref() {
         lines.push(labelled_line(
-            "untrusted result claim",
+            "result",
             render_text(claim),
             palette,
         ));
@@ -1314,11 +1458,62 @@ fn detail_lines(
     lines
 }
 
-fn lifecycle_status(agent: &AgentState) -> &'static str {
-    if agent.is_waiting_on_agent() {
+fn session_latest_activity(state: &SessionState) -> Option<DateTime<Utc>> {
+    state
+        .agents
+        .values()
+        .filter_map(|agent| agent.last_activity_at)
+        .max()
+}
+
+fn stale_reference_for_display(
+    state: &SessionState,
+    loading: bool,
+    catching_up: bool,
+) -> Option<DateTime<Utc>> {
+    if loading || catching_up {
+        None
+    } else {
+        session_latest_activity(state)
+    }
+}
+
+fn stale_running_agent(agent: &AgentState, stale_reference: Option<DateTime<Utc>>) -> bool {
+    agent.parent_thread_id.is_some()
+        && agent.latest_turn.status == TurnStatus::Running
+        && agent.last_activity_at.is_some_and(|last_activity| {
+            stale_reference.is_some_and(|latest_activity| {
+                latest_activity
+                    .signed_duration_since(last_activity)
+                    .num_seconds()
+                    >= STALE_AFTER_SESSION_PROGRESS_SECONDS
+            })
+        })
+}
+
+fn lifecycle_status(agent: &AgentState, stale_reference: Option<DateTime<Utc>>) -> &'static str {
+    if stale_running_agent(agent, stale_reference) {
+        "STALE"
+    } else if agent.is_waiting_on_agent() {
         "WAITING ON AGENT ↓"
     } else {
         status(agent.latest_turn.status)
+    }
+}
+
+fn lifecycle_style(
+    agent: &AgentState,
+    stale_reference: Option<DateTime<Utc>>,
+    palette: Palette,
+) -> Style {
+    if stale_running_agent(agent, stale_reference) {
+        return palette.warning();
+    }
+    match agent.latest_turn.status {
+        TurnStatus::Completed => palette.good(),
+        TurnStatus::Interrupted | TurnStatus::Errored => palette.error(),
+        TurnStatus::Pending => palette.warning(),
+        TurnStatus::Running => palette.title(),
     }
 }
 
@@ -1341,8 +1536,15 @@ fn coverage(value: CoverageLevel) -> &'static str {
     }
 }
 
+fn utc_date_time(time: DateTime<Utc>) -> String {
+    time.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 fn timestamp(value: Option<DateTime<Utc>>) -> String {
-    value.map_or_else(|| "unknown".into(), |time| time.to_rfc3339())
+    value.map_or_else(
+        || "unknown".into(),
+        |time| format!("{} UTC", utc_date_time(time)),
+    )
 }
 
 fn age(time: DateTime<Utc>) -> String {
@@ -1431,8 +1633,9 @@ mod tests {
             depth: 0,
         };
         let palette = Palette::new(ColorMode::None);
-        let tree = line_text(&tree_line(&row, agent, palette));
-        let detail = detail_lines(Some(agent), state, group, palette)
+        let stale_reference = session_latest_activity(state);
+        let tree = line_text(&tree_line(&row, agent, stale_reference, palette));
+        let detail = detail_lines(Some(agent), state, group, stale_reference, palette)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -1458,6 +1661,7 @@ mod tests {
                 started_at: None,
                 ordinal: Some(1),
                 sequence: 1,
+                interaction_sequence: 0,
             },
         );
         let (tree, detail) = rendered_agent(&agent, &group, &state);
@@ -1473,6 +1677,7 @@ mod tests {
                 started_at: None,
                 ordinal: Some(2),
                 sequence: 2,
+                interaction_sequence: 1,
             },
         );
         let (tree, detail) = rendered_agent(&agent, &group, &state);
@@ -1697,6 +1902,7 @@ mod tests {
         let child_line = line_text(&tree_line(
             child_row,
             &state.agents["child"],
+            None,
             Palette::new(ColorMode::None),
         ));
         assert!(child_line.starts_with("  ↪ child"));
@@ -1718,6 +1924,7 @@ mod tests {
         let grandchild_line = line_text(&tree_line(
             grandchild,
             &state.agents["grandchild"],
+            None,
             Palette::new(ColorMode::None),
         ));
         assert!(grandchild_line.starts_with("  ↪ grandchild"));
@@ -1751,6 +1958,73 @@ mod tests {
     }
 
     #[test]
+    fn stale_requires_later_session_evidence_and_preserves_visibility() {
+        let (group, mut state) = fixture();
+        let agent_activity = DateTime::from_timestamp(0, 0).unwrap();
+        let before_threshold =
+            DateTime::from_timestamp(STALE_AFTER_SESSION_PROGRESS_SECONDS - 1, 0).unwrap();
+        let at_threshold =
+            DateTime::from_timestamp(STALE_AFTER_SESSION_PROGRESS_SECONDS, 0).unwrap();
+
+        {
+            let child = state.agents.get_mut("child").unwrap();
+            child.latest_turn.status = TurnStatus::Running;
+            child.last_activity_at = Some(agent_activity);
+        }
+
+        let child = state.agents.get("child").unwrap();
+        assert_eq!(lifecycle_status(child, None), "RUNNING");
+        assert_eq!(lifecycle_status(child, Some(before_threshold)), "RUNNING");
+        assert_eq!(lifecycle_status(child, Some(at_threshold)), "STALE");
+        assert_eq!(
+            lifecycle_style(child, Some(at_threshold), Palette::new(ColorMode::Auto)).fg,
+            Some(Color::Yellow)
+        );
+
+        state.agents.get_mut("root").unwrap().last_activity_at = Some(at_threshold);
+        assert_eq!(stale_reference_for_display(&state, true, false), None);
+        assert_eq!(stale_reference_for_display(&state, false, true), None);
+        let stale_reference = stale_reference_for_display(&state, false, false);
+        assert_eq!(stale_reference, Some(at_threshold));
+        let visible = flatten(&group, &state, true);
+        assert!(visible.iter().any(|row| row.thread_id == "child"));
+
+        let child = state.agents.get("child").unwrap();
+        let row = visible.iter().find(|row| row.thread_id == "child").unwrap();
+        let tree = tree_line(row, child, stale_reference, Palette::new(ColorMode::Auto));
+        let stale_status = tree
+            .spans
+            .iter()
+            .find(|span| span.content.contains("STALE"))
+            .unwrap();
+        assert_eq!(stale_status.style.fg, Some(Color::Yellow));
+
+        let details = detail_lines(
+            Some(child),
+            &state,
+            &group,
+            stale_reference,
+            Palette::new(ColorMode::Auto),
+        );
+        let stale_detail = details
+            .iter()
+            .find(|line| line_text(line).starts_with("stale: "))
+            .unwrap();
+        assert_eq!(stale_detail.spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(stale_detail.spans[1].style.fg, Some(Color::Yellow));
+        assert!(line_text(stale_detail).contains("completion unknown"));
+
+        let root = state.agents.get_mut("root").unwrap();
+        root.latest_turn.status = TurnStatus::Running;
+        root.last_activity_at = Some(agent_activity);
+        assert_eq!(lifecycle_status(root, Some(at_threshold)), "RUNNING");
+
+        let child = state.agents.get_mut("child").unwrap();
+        child.latest_turn.status = TurnStatus::Completed;
+        assert_eq!(lifecycle_status(child, Some(at_threshold)), "COMPLETED");
+    }
+
+    #[test]
     fn interaction_history_opens_at_latest_and_preserves_scrolled_position() {
         let (group, mut state) = fixture();
         {
@@ -1773,6 +2047,12 @@ mod tests {
                     "timestamp": "2026-09-03T10:00:02Z",
                     "type": "response_item",
                     "payload": {"type": "function_call", "call_id": "call", "name": "exec"}
+                }),
+                serde_json::json!({
+                    "ordinal": 13,
+                    "timestamp": "2026-09-03T10:00:05Z",
+                    "type": "response_item",
+                    "payload": {"type": "function_call_output", "call_id": "call"}
                 }),
             ] {
                 assert!(crate::model::reduce(root, &record));
@@ -1812,8 +2092,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("interactions · root · 3 retained"));
-        assert!(rendered.contains("content: started exec"));
+        assert!(
+            rendered.contains("interactions · root · orchestrator · gpt-5.6-sol · high · RUNNING")
+        );
+        assert!(rendered.contains("tool: exec · returned after 3.0s"));
+        assert!(rendered.contains("state: returned after 3.0s"));
         assert!(rendered.contains("↑/k older"));
         assert!(!rendered.contains("h hide completed"));
 
@@ -1832,7 +2115,7 @@ mod tests {
         assert!(crate::model::reduce(
             root,
             &serde_json::json!({
-                "ordinal": 13,
+                "ordinal": 14,
                 "type": "event_msg",
                 "payload": {"type": "agent_reasoning", "text": "new live event"}
             }),
@@ -1959,6 +2242,15 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_use_clean_utc_date_times() {
+        let time = DateTime::parse_from_rfc3339("2026-09-03T09:04:39.564+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(utc_date_time(time), "2026-09-03 09:04:39");
+        assert_eq!(timestamp(Some(time)), "2026-09-03 09:04:39 UTC");
+    }
+
+    #[test]
     fn render_boundary_removes_controls_and_bounds_metadata() {
         let unsafe_text = format!("prefix\u{1b}[31m\n{}", "x".repeat(RENDER_TEXT_LIMIT * 2));
         let rendered = render_text(&unsafe_text);
@@ -2003,7 +2295,7 @@ mod tests {
 
         {
             let root = state.agents.get("root").unwrap();
-            let line = tree_line(&rows[0], root, palette);
+            let line = tree_line(&rows[0], root, None, palette);
             let text = line
                 .spans
                 .iter()
@@ -2030,7 +2322,7 @@ mod tests {
             assert_eq!(model_span.style.fg, Some(Color::LightMagenta));
             assert_eq!(effort_span.style.fg, Some(Color::LightYellow));
 
-            let details = detail_lines(Some(root), &state, &group, palette);
+            let details = detail_lines(Some(root), &state, &group, None, palette);
             let details_text = details
                 .iter()
                 .flat_map(|line| line.spans.iter())
@@ -2068,7 +2360,7 @@ mod tests {
         state.data_health.oversized_records = 2;
 
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(Some(root), &state, &group, palette);
+        let details = detail_lines(Some(root), &state, &group, None, palette);
         let details_text = details
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -2105,7 +2397,13 @@ mod tests {
         }
 
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(Some(root), &state, &group, Palette::new(ColorMode::Auto));
+        let details = detail_lines(
+            Some(root),
+            &state,
+            &group,
+            None,
+            Palette::new(ColorMode::Auto),
+        );
         let details_text = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(details_text.contains("message: shared completion"));
         assert!(!details_text.contains("activity: shared completion"));
@@ -2113,7 +2411,13 @@ mod tests {
 
         state.agents.get_mut("root").unwrap().final_message = Some("distinct final".into());
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(Some(root), &state, &group, Palette::new(ColorMode::Auto));
+        let details = detail_lines(
+            Some(root),
+            &state,
+            &group,
+            None,
+            Palette::new(ColorMode::Auto),
+        );
         let details_text = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(details_text.contains("message: shared completion"));
         assert!(details_text.contains("final: distinct final"));

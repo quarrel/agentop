@@ -46,6 +46,7 @@ pub struct InFlightCall {
     pub started_at: Option<DateTime<Utc>>,
     pub ordinal: Option<u64>,
     pub sequence: u64,
+    pub interaction_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,13 @@ pub enum InteractionKind {
     Communication,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolInteractionState {
+    Open,
+    Returned,
+    EndedWithoutReturn,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentInteraction {
     pub sequence: u64,
@@ -64,6 +72,8 @@ pub struct AgentInteraction {
     pub summary: String,
     pub timestamp: Option<DateTime<Utc>>,
     pub ordinal: Option<u64>,
+    pub tool_state: Option<ToolInteractionState>,
+    pub finished_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone)]
 pub struct DiagnosticSample {
@@ -189,23 +199,15 @@ impl AgentState {
             .map(|call| (call.started_at, call.ordinal))
     }
 
-    fn record_interaction(
+    fn push_interaction(
         &mut self,
         kind: InteractionKind,
         summary: impl AsRef<str>,
         timestamp: Option<DateTime<Utc>>,
         ordinal: Option<u64>,
-    ) {
-        let summary = sanitise(summary.as_ref());
-        if let Some(previous) = self
-            .interactions
-            .back_mut()
-            .filter(|previous| previous.kind == kind && previous.summary == summary)
-        {
-            previous.timestamp = timestamp.or(previous.timestamp);
-            previous.ordinal = ordinal.or(previous.ordinal);
-            return;
-        }
+        tool_state: Option<ToolInteractionState>,
+        finished_at: Option<DateTime<Utc>>,
+    ) -> u64 {
         let sequence = self.next_interaction_sequence;
         self.next_interaction_sequence += 1;
         if self.interactions.len() == INTERACTION_LIMIT {
@@ -214,10 +216,81 @@ impl AgentState {
         self.interactions.push_back(AgentInteraction {
             sequence,
             kind,
-            summary,
+            summary: sanitise(summary.as_ref()),
             timestamp,
             ordinal,
+            tool_state,
+            finished_at,
         });
+        sequence
+    }
+
+    fn record_interaction(
+        &mut self,
+        kind: InteractionKind,
+        summary: impl AsRef<str>,
+        timestamp: Option<DateTime<Utc>>,
+        ordinal: Option<u64>,
+    ) -> u64 {
+        let summary = sanitise(summary.as_ref());
+        if let Some(previous) = self.interactions.back_mut().filter(|previous| {
+            previous.kind == kind
+                && previous.kind != InteractionKind::Tool
+                && previous.summary == summary
+        }) {
+            previous.timestamp = timestamp.or(previous.timestamp);
+            previous.ordinal = ordinal.or(previous.ordinal);
+            return previous.sequence;
+        }
+        self.push_interaction(kind, summary, timestamp, ordinal, None, None)
+    }
+
+    fn start_tool_interaction(
+        &mut self,
+        tool_name: &str,
+        timestamp: Option<DateTime<Utc>>,
+        ordinal: Option<u64>,
+    ) -> u64 {
+        self.push_interaction(
+            InteractionKind::Tool,
+            tool_name,
+            timestamp,
+            ordinal,
+            Some(ToolInteractionState::Open),
+            None,
+        )
+    }
+
+    fn finish_tool_interaction(
+        &mut self,
+        call: InFlightCall,
+        finished_at: Option<DateTime<Utc>>,
+        state: ToolInteractionState,
+    ) {
+        if let Some(interaction) = self
+            .interactions
+            .iter_mut()
+            .find(|interaction| interaction.sequence == call.interaction_sequence)
+        {
+            interaction.tool_state = Some(state);
+            interaction.finished_at = finished_at;
+        }
+    }
+
+    fn close_in_flight_calls(&mut self, finished_at: Option<DateTime<Utc>>) {
+        let mut calls = self
+            .in_flight_calls
+            .drain()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
+        calls.sort_by_key(|call| call.sequence);
+        for call in calls {
+            self.finish_tool_interaction(
+                call,
+                finished_at,
+                ToolInteractionState::EndedWithoutReturn,
+            );
+        }
     }
 }
 
@@ -365,6 +438,14 @@ fn has_meaningful_communication_content(payload: &Value) -> bool {
     })
 }
 
+fn compact_agent_reference(reference: &str) -> &str {
+    if reference == "/root" {
+        "root"
+    } else {
+        reference.strip_prefix("/root/").unwrap_or(reference)
+    }
+}
+
 pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
     let ordinal = record.get("ordinal").and_then(Value::as_u64);
     let timestamp = parse_time(record.get("timestamp"));
@@ -391,7 +472,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     started_at: parse_time(payload.get("started_at")).or(timestamp),
                     completed_at: None,
                 };
-                agent.in_flight_calls.clear();
+                agent.close_in_flight_calls(timestamp);
                 agent.next_call_sequence = 0;
                 agent.last_reasoning_summary = None;
                 agent.last_message = None;
@@ -411,6 +492,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 agent.latest_turn.status = TurnStatus::Completed;
                 agent.latest_turn.completed_at =
                     parse_time(payload.get("completed_at")).or(timestamp);
+                agent.close_in_flight_calls(agent.latest_turn.completed_at);
                 if let Some(raw) = payload.get("last_agent_message").and_then(Value::as_str) {
                     agent.result_status_claim = receipt_claim(raw);
                     agent.final_message = Some(sanitise(raw));
@@ -431,12 +513,12 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     agent.latest_turn.completed_at,
                     ordinal,
                 );
-                agent.in_flight_calls.clear();
                 agent.last_activity_at = timestamp;
                 true
             }
             Some("turn_aborted") => {
                 agent.latest_turn.status = TurnStatus::Interrupted;
+                agent.close_in_flight_calls(timestamp);
                 agent.last_activity_at = timestamp;
                 agent.record_interaction(
                     InteractionKind::Lifecycle,
@@ -448,6 +530,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
             }
             Some("error") => {
                 agent.latest_turn.status = TurnStatus::Errored;
+                agent.close_in_flight_calls(timestamp);
                 agent.last_activity_at = timestamp;
                 agent.record_interaction(
                     InteractionKind::Lifecycle,
@@ -503,11 +586,10 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                         {
                             if payload["type"] == "item_completed" {
                                 if let Some(call) = agent.in_flight_calls.remove(id) {
-                                    agent.record_interaction(
-                                        InteractionKind::Tool,
-                                        format!("finished {}", call.tool_name),
+                                    agent.finish_tool_interaction(
+                                        call,
                                         timestamp,
-                                        ordinal,
+                                        ToolInteractionState::Returned,
                                     );
                                 }
                             }
@@ -569,12 +651,8 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_owned();
-                agent.record_interaction(
-                    InteractionKind::Tool,
-                    format!("started {tool_name}"),
-                    timestamp,
-                    ordinal,
-                );
+                let interaction_sequence =
+                    agent.start_tool_interaction(&tool_name, timestamp, ordinal);
                 agent.in_flight_calls.insert(
                     call_id,
                     InFlightCall {
@@ -583,6 +661,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                         started_at: timestamp,
                         ordinal,
                         sequence,
+                        interaction_sequence,
                     },
                 );
                 agent.last_activity_at = timestamp;
@@ -591,12 +670,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
             Some("custom_tool_call_output") | Some("function_call_output") => {
                 let id = payload["call_id"].as_str().expect("validated call_id");
                 if let Some(call) = agent.in_flight_calls.remove(id) {
-                    agent.record_interaction(
-                        InteractionKind::Tool,
-                        format!("finished {}", call.tool_name),
-                        timestamp,
-                        ordinal,
-                    );
+                    agent.finish_tool_interaction(call, timestamp, ToolInteractionState::Returned);
                 }
                 agent.last_activity_at = timestamp;
                 true
@@ -639,8 +713,8 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                     let recipient = payload["recipient"].as_str().expect("validated recipient");
                     let communication = sanitise(&format!(
                         "message {} → {}",
-                        sanitise(author),
-                        sanitise(recipient)
+                        sanitise(compact_agent_reference(author)),
+                        sanitise(compact_agent_reference(recipient))
                     ));
                     agent.record_interaction(
                         InteractionKind::Communication,
@@ -729,10 +803,38 @@ mod tests {
         reduce(
             &mut a,
             &r(
-                r#"{"timestamp":"2024-01-01T00:00:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"a"}}"#,
+                r#"{"timestamp":"2024-01-01T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"a"}}"#,
             ),
         );
         assert_eq!(a.current_activity(), Some("two"));
+        assert_eq!(a.interactions.len(), 2);
+        assert_eq!(a.interactions[0].summary, "one");
+        assert_eq!(
+            a.interactions[0].tool_state,
+            Some(ToolInteractionState::Returned)
+        );
+        assert_eq!(a.interactions[1].summary, "two");
+        assert_eq!(
+            a.interactions[1].tool_state,
+            Some(ToolInteractionState::Open)
+        );
+
+        reduce(
+            &mut a,
+            &r(
+                r#"{"timestamp":"2024-01-01T00:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+            ),
+        );
+        assert_eq!(
+            a.interactions[1].tool_state,
+            Some(ToolInteractionState::EndedWithoutReturn)
+        );
+        assert_eq!(
+            a.interactions[1].finished_at,
+            DateTime::parse_from_rfc3339("2024-01-01T00:00:02Z")
+                .ok()
+                .map(|time| time.with_timezone(&Utc))
+        );
     }
     #[test]
     fn reasoning_sanitising_and_bookkeeping() {
@@ -892,7 +994,11 @@ mod tests {
         assert!(reduce(&mut state, &valid));
         assert_eq!(state.in_flight_calls["c"].summary, "running exec");
         assert!(!state.in_flight_calls["c"].summary.contains("secret"));
-        assert_eq!(state.interactions.back().unwrap().summary, "started exec");
+        assert_eq!(state.interactions.back().unwrap().summary, "exec");
+        assert_eq!(
+            state.interactions.back().unwrap().tool_state,
+            Some(ToolInteractionState::Open)
+        );
         assert!(!state
             .interactions
             .back()
@@ -953,7 +1059,7 @@ mod tests {
             r#"{"timestamp":"2026-08-24T20:20:52Z","type":"event_msg","payload":{"type":"agent_message","message":"older output"}}"#,
             r#"{"timestamp":"2026-08-24T20:20:53Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"c","name":"exec","input":"private"}}"#,
             r#"{"timestamp":"2026-08-24T20:20:54Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c","output":"private"}}"#,
-            r#"{"timestamp":"2026-08-24T20:20:55Z","type":"response_item","payload":{"type":"agent_message","author":"parent","recipient":"child","content":[{"type":"input_text","text":"incoming private"},{"type":"encrypted_content","encrypted_content":"ciphertext"}]}}"#,
+            r#"{"timestamp":"2026-08-24T20:20:55Z","type":"response_item","payload":{"type":"agent_message","author":"/root","recipient":"/root/parent/child","content":[{"type":"input_text","text":"incoming private"},{"type":"encrypted_content","encrypted_content":"ciphertext"}]}}"#,
             r#"{"timestamp":"2026-08-24T20:20:56Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"status=CANDIDATE"}}"#,
         ] {
             assert!(reduce(&mut state, &r(record)));
@@ -963,7 +1069,7 @@ mod tests {
         assert_eq!(state.last_message.as_deref(), Some("older output"));
         assert_eq!(
             state.last_communication.as_deref(),
-            Some("message parent → child")
+            Some("message root → parent/child")
         );
         assert_eq!(state.final_message.as_deref(), Some("status=CANDIDATE"));
         assert_eq!(state.result_status_claim.as_deref(), Some("CANDIDATE"));
