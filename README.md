@@ -121,7 +121,7 @@ Update the user catalogue for official Codex releases newer than the binary:
 agentop build-schema
 ```
 
-This explicit command is the only Agentop operation that uses the network or writes catalogue data. It reads official immutable `rust-v*` tag provenance, downloads the stable precomputed export, extracts only `RolloutLine.json`, and stores unique schemas by canonical hash. See [the schema catalogue documentation](schemas/README.md).
+This explicit command is the only Agentop operation that uses the network or writes catalogue data. It reads official immutable tag provenance from the [codex-cli GitHub repo](https://github.com/openai/codex), downloads the stable precomputed export, extracts only `RolloutLine.json`, and stores unique schemas by canonical hash. See [the schema catalogue documentation](schemas/README.md).
 
 ## Privacy and scope
 

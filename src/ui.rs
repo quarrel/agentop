@@ -1462,14 +1462,14 @@ fn detail_lines(
     if let Some(model) = agent.model.as_deref() {
         push_detail_value(
             &mut metadata_spans,
-            format!("model {}", render_text(model)),
+            render_text(model),
             palette.model(),
         );
     }
     if let Some(effort) = agent.reasoning_effort.as_deref() {
         push_detail_value(
             &mut metadata_spans,
-            format!("reasoning {}", render_text(effort)),
+            render_text(effort),
             palette.reasoning_effort(effort),
         );
     }
