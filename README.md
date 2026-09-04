@@ -1,66 +1,139 @@
 # Agentop
 
-Agentop is a Rust terminal UI for observing live Codex multi-agent work. It reconstructs an agent tree and recent activity by reading rollout JSONL files without modifying them.
+[![CI](https://github.com/quarrel/agentop/actions/workflows/ci.yml/badge.svg)](https://github.com/quarrel/agentop/actions/workflows/ci.yml)
 
-## Install
+Agentop is a read-only terminal UI for observing Codex multi-agent sessions. It reconstructs agent trees, lifecycle state, recent activity, tool use, interaction history, and context pressure from the rollout JSONL files Codex already writes.
 
-Install directly from the repository:
+It works with Codex CLI sessions and sessions created through the Codex IDE extension when their rollout files are available in the same sessions directory. Agentop does not control Codex or require changes to the sessions it observes.
 
-```bash
-cargo install --git https://github.com/quarrel/agentop.git
-```
+## Installation
 
-From a local checkout, use `cargo install --path .`. The crates.io package name [`agentop`](https://crates.io/crates/agentop) is already owned by another Codex agent observer, which inspects running processes rather than reconstructing rollout history, so `cargo install agentop` does not install this repository. Publishing through crates.io will require a distinct package name; that package can still install an executable named `agentop`.
+### Prebuilt Linux binary
 
-## Run
+Tagged releases publish an x86-64 Linux archive and SHA-256 checksum on the [GitHub Releases](https://github.com/quarrel/agentop/releases) page.
 
-Use the repository Dev Container on Linux/amd64, then run:
+### Install from source
 
-```bash
-cargo run -- --sessions-dir "$HOME/.codex/sessions" --color=auto
-```
-
-With no `--session`, Agentop opens a global session browser ordered by the greatest rollout-file modification time in each group, falling back to the greatest `session_meta` timestamp. This is observed file/metadata update recency, not inferred lifecycle or proof that a session is running. Each row shows a bounded, sanitised project label from the root rollout's recorded `git.repository_url` repository name, falling back to its recorded `cwd`, plus an abbreviated session ID, rollout count, and update age; picker details show bounded recorded repository and cwd information. Use Up/Down or j/k to navigate, Enter to open, r to refresh the global list, Esc to return from a tree or exit the picker, and q to exit. Select a specific session directly, bypassing the picker, with an exact ID or unique prefix:
+A stable Rust toolchain is required:
 
 ```bash
-cargo run -- --sessions-dir "$HOME/.codex/sessions" --session 01abc
+cargo install --git https://github.com/quarrel/agentop.git --locked
 ```
 
-Within a session tree, use Up/Down or j/k to select an agent, Enter to open its bounded interaction history, h to hide or show completed agents, and r to rescan. Hidden completed parents do not hide live descendants; those descendants are promoted one visual level. Agent and interaction lists use only their natural height up to their established screen-share cap, leaving otherwise unused rows to the selected detail pane. Compact rows remain deliberately short, while agent details and the selected-interaction detail render their larger bounded retained content when the terminal has room. The interaction view shows agent context in its header and pairs each tool invocation into one entry with observed return state and elapsed duration. Tool rows use bounded, sanitised action summaries: direct calls can show a selected query, path, target, or command, while Codex `exec` wrappers are reduced to the nested tool names and grouped call counts they contain. Raw tool inputs and outputs are never retained. Use Up/k for older entries and Down/j for newer entries. Esc returns one level and q exits from anywhere. `--color=auto` is the default and enables a restrained semantic palette because an interactive TTY is required. Use `--color=none` to disable every explicit foreground and background colour; labels, the `›` selection marker, and bold/reversed selection attributes remain available as non-colour cues.
+From a local checkout:
 
-The screen shows each agent's model and reasoning effort before its latest-turn lifecycle, followed by known timestamps, meaningful activity, reasoning summaries, messages, and final results when available. When Codex reports token counts, the tree adds the latest observed context pressure as `CTX n%`; selected-agent details show exact input/window counts, change from the previous observation, optional cached-input/output/reasoning counts, and cumulative usage as a separately labelled accounting value. Context pressure becomes yellow at 70% and red at 85%, with bounded handoff guidance in details. A `context_compacted` event adds a timestamped interaction and clears the prior occupancy measurement until Codex reports another one; Agentop does not infer how many tokens compaction removed. Missing or malformed measurements are omitted rather than shown as zero. Healthy schema-catalogue and compatibility values stay out of the way; missing schemas, unknown compatibility, and malformed or oversized session records appear in red. Unknown record/event counts and raw parser diagnostics are retained internally but omitted from normal agent details because they are session-wide development evidence rather than actionable per-agent state. Opening a session shows its root promptly and reduces existing history in bounded batches. Each initial catch-up poll has a separate 8 MiB/65,536-record budget while reserving the original 256 KiB/2,048-work allowance for live tails, discovery, and pending children. The event loop runs successive bounded polls for up to roughly 100 ms before redrawing, checking for terminal input between polls; saturated loading windows continue without an artificial inter-window delay. Ordinary live polling then settles to about one second. A correlated `spawn_agent` result in a tailed rollout prioritises discovery in the result timestamp's session-date directory; the bounded recursive scan remains the recovery path. A running agent whose newest unfinished call is exactly `wait_agent` is labelled `WAITING ON AGENT ↓`, while its activity remains `wait_agent`. Once loading has caught up, a non-root agent still recorded as running is labelled `STALE` in yellow when a later complete `list_agents` snapshot covering its path no longer includes it. When no such snapshot exists, at least two hours of later meaningful activity elsewhere in the session provides the conservative fallback. Both forms mean completion remains unknown, and completed-agent filtering does not hide the agent.
-Current-context pressure is an active-agent operational signal, so retained measurements are omitted from tree rows and selected-agent details for `COMPLETED` and `STALE` agents.
+```bash
+cargo install --path . --locked
+```
 
-## Update the schema catalogue
+The crates.io package named [`agentop`](https://crates.io/crates/agentop) is a different project. Do not use `cargo install agentop` for this repository. If this project is published to crates.io later, it will need a distinct package name while retaining the `agentop` executable name.
 
-Agentop embeds the exact Codex version-to-RolloutLine mappings available when it is built. To discover later official releases without reinstalling Agentop, run:
+Agentop is developed and tested on Linux/amd64. Other platforms may work but are not currently covered by CI.
+
+## Quick start
+
+Run Agentop from any directory:
+
+```bash
+agentop
+```
+
+The sessions directory is resolved in this order:
+
+1. `--sessions-dir <path>`
+2. `$CODEX_HOME/sessions`
+3. `$HOME/.codex/sessions`
+
+With no `--session`, Agentop opens a browser of the most recently updated sessions. The project label comes from the root rollout's recorded repository name, falling back to its recorded working directory. Select a session with Enter, or open one directly with an exact session ID or unique prefix:
+
+```bash
+agentop --session 01abc
+agentop --sessions-dir /path/to/sessions --session 01abc
+```
+
+Use `--color=none` to disable explicit terminal colours. `--color=auto` is the default and enables colour in the required interactive terminal.
+
+```text
+Usage: agentop [OPTIONS] [COMMAND]
+
+Commands:
+  build-schema    Fetch and catalogue schemas for new official Codex releases
+
+Options:
+  --sessions-dir <PATH>
+  --session <ID_OR_PREFIX>
+  --color <auto|none>
+  -V, --version
+```
+
+## Controls
+
+| View | Key | Action |
+| --- | --- | --- |
+| Session browser | ↑/↓ or j/k | Select a session |
+| Session browser | Enter | Open the selected session |
+| Session browser | r | Refresh the session list |
+| Agent tree | ↑/↓ or j/k | Select an agent |
+| Agent tree | Enter | Open the selected agent's interaction history |
+| Agent tree | h | Hide or show completed agents |
+| Agent tree | r | Rescan for rollout updates and new agents |
+| Interaction history | ↑/↓ or j/k | Move through retained interactions |
+| Any nested view | Esc | Return one level |
+| Any view | q | Quit |
+
+Opening a session renders its root promptly and adds agents progressively while historical records are reduced. Live rollouts and newly created child rollouts continue to appear without reopening the session.
+
+## Status and context
+
+Agentop reports the latest observed turn lifecycle:
+
+| Status | Meaning |
+| --- | --- |
+| `PENDING` | No running or terminal turn has been observed yet |
+| `RUNNING` | The latest observed turn is active |
+| `WAITING ON AGENT ↓` | The newest unfinished call is exactly `wait_agent`; the relevant child normally follows below |
+| `COMPLETED` | The latest observed turn completed |
+| `INTERRUPTED` / `ERRORED` | Codex recorded a terminal interruption or error |
+| `STALE` | The rollout still says running, but later session evidence indicates it is no longer active; completion is unknown |
+
+`STALE` is deliberately conservative. Agentop prefers a later complete `list_agents` snapshot that excludes the agent and otherwise requires at least two hours of later meaningful session activity. It never converts stale evidence into a completion claim.
+
+For active agents, `CTX n%` is the latest observed request input count divided by the reported model context window. It is not a live counter. Yellow begins at 70% and red at 85%. Completed and stale agents omit context pressure because it is no longer actionable. Cumulative token usage is labelled separately and is never treated as current context occupancy.
+
+The interaction view retains bounded, sanitised lifecycle, message, reasoning, communication, context-management, and paired tool-call summaries. It does not retain raw tool inputs or outputs.
+
+## Compatibility and schema catalogue
+
+Codex rollout formats change frequently, and one sessions directory can contain files written by several producer versions. Agentop therefore identifies every rollout by its exact `session_meta.payload.cli_version`; it does not infer compatibility from a version range or substitute a nearby version.
+
+The embedded catalogue maps exact Codex versions to canonical `RolloutLine.json` schema hashes. Structurally identical releases share one schema family. Catalogue membership proves schema provenance only. Runtime claims are separate:
+
+- **Catalogued:** the exact version maps to a verified schema family.
+- **Ingestable:** Agentop can discover, group, and tail it without crashing.
+- **Semantically covered:** representative fixtures establish the reducer behaviour.
+- **Live verified:** that exact version has been exercised against a running producer.
+
+Agentop targets tolerant ingestion of the Codex 0.149 family and later, but semantic coverage is claimed only where there is fixture or live evidence. Unknown fields and variants are expected; malformed required data remains visible as a bounded diagnostic.
+
+Update the user catalogue for official Codex releases newer than the binary:
 
 ```bash
 agentop build-schema
 ```
 
-This explicit maintenance command uses GitHub's official `rust-v*` tags, immutable tag/commit provenance, and stable release exports. It downloads only missing versions, stores each unique canonical `RolloutLine.json` once in a content-addressed user catalogue, and never replaces a conflicting mapping. The default catalogue is under `$XDG_DATA_HOME/agentop` (or `$HOME/.local/share/agentop`); `AGENTOP_SCHEMA_DIR` and `--catalogue-dir` override it. `GH_TOKEN` or `GITHUB_TOKEN` may be set for GitHub API authentication.
+This explicit command is the only Agentop operation that uses the network or writes catalogue data. It reads official immutable `rust-v*` tag provenance, downloads the stable precomputed export, extracts only `RolloutLine.json`, and stores unique schemas by canonical hash. See [the schema catalogue documentation](schemas/README.md).
 
-## Safety and limitations
+## Privacy and scope
 
-Agentop is a read-only observer. It never sends agent messages or writes, truncates, renames, moves, deletes, or locks rollout files for writing. Rollouts may contain sensitive prompts, messages, reasoning, command output, paths, and identifiers; never commit real rollouts or paste raw payloads into diagnostics.
+Normal TUI operation treats the sessions directory as immutable input: it never writes, truncates, renames, moves, deletes, or locks rollout files for writing. It is also offline.
 
-The POC has representative semantic evidence for exact Codex version `0.149.0-alpha.4.1` and bounded live verification for exact version `0.152.1`. Other exact versions may merely be ingestable and/or uncatalogued; compatibility is never inferred from version ranges. Compatibility is chosen from each rollout's exact `session_meta.payload.cli_version`. Catalogue status does not prove semantic coverage, and silence is not interpreted as a stalled or blocked agent.
+Rollouts can contain sensitive prompts, messages, reasoning, commands, paths, and identifiers. Agentop sanitises and bounds terminal text, but anyone who can run it already has access to the underlying files. Do not publish real rollouts, raw diagnostics, or unsanitised recordings.
 
-The normal TUI has no networking, mouse support, persistent index, remote control, trace backend, or app-server integration. Only the explicit `build-schema` maintenance command uses the network and writes Agentop's schema catalogue; it never accesses rollout files for writing.
+Agentop deliberately has no database, daemon, remote control, cross-machine monitoring, trace backend, app-server integration, payload decryption, or plugin system.
 
 ## Development
 
-Build and verify with Cargo:
-
-```bash
-cargo build
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-Schema catalogue and contributor workflows are documented in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The [POC implementation plan](docs/POC_IMPLEMENTATION_PLAN.md) remains the design and acceptance baseline.
+See [Development](docs/DEVELOPMENT.md) for build, test, schema, recording, and release workflows, and [Architecture](docs/ARCHITECTURE.md) for the ingestion and reducer contracts.
 
 ## Licence
 

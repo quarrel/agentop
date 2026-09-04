@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -219,7 +220,12 @@ pub fn canonical_schema_bytes(value: &Value) -> Result<Vec<u8>> {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    let digest = Sha256::digest(bytes);
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hash
 }
 
 pub fn verify_schema_file(path: &Path, expected_hash: &str) -> Result<()> {
@@ -408,5 +414,12 @@ mod tests {
                 }
             );
         }
+    }
+    #[test]
+    fn sha256_hex_is_lowercase_and_zero_padded() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

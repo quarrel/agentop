@@ -10,6 +10,11 @@ const INTERACTION_LIMIT: usize = 256;
 const AGENT_LIST_SNAPSHOT_LIMIT: usize = 64;
 const AGENT_LIST_MEMBER_LIMIT: usize = 1_024;
 const SPAWN_HINT_LIMIT: usize = 64;
+const EXEC_CELL_LIMIT: usize = 32;
+const TERMINAL_SESSION_LIMIT: usize = 32;
+const EXEC_INPUT_SCAN_LIMIT: usize = 64 * 1024;
+const EXEC_OUTPUT_SCAN_LIMIT: usize = 64 * 1024;
+const EXEC_OUTPUT_BLOCK_LIMIT: usize = 8;
 pub const STALE_AFTER_SESSION_PROGRESS_SECONDS: i64 = 2 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,8 +95,21 @@ pub enum InteractionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolInteractionState {
     Open,
+    Yielded,
     Returned,
     EndedWithoutReturn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalIoKind {
+    Poll,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalIoCall {
+    session_id: u64,
+    kind: TerminalIoKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +234,8 @@ pub struct AgentState {
     agent_list_calls: HashMap<String, AgentListScope>,
     agent_list_snapshots: VecDeque<AgentListSnapshot>,
     spawned_agent_hints: VecDeque<SpawnedAgentHint>,
+    exec_cells: VecDeque<(String, String)>,
+    terminal_sessions: VecDeque<(u64, String)>,
 }
 impl AgentState {
     pub fn new(thread_id: String, cli_version: String) -> Self {
@@ -248,6 +268,8 @@ impl AgentState {
             agent_list_calls: HashMap::new(),
             agent_list_snapshots: VecDeque::new(),
             spawned_agent_hints: VecDeque::new(),
+            exec_cells: VecDeque::new(),
+            terminal_sessions: VecDeque::new(),
         }
     }
     pub fn current_activity(&self) -> Option<&str> {
@@ -368,6 +390,8 @@ impl AgentState {
             );
         }
         self.agent_list_calls.clear();
+        self.exec_cells.clear();
+        self.terminal_sessions.clear();
     }
 
     fn record_agent_list_snapshot(
@@ -391,6 +415,75 @@ impl AgentState {
             self.spawned_agent_hints.pop_front();
         }
         self.spawned_agent_hints.push_back(hint);
+    }
+
+    fn record_exec_cell(&mut self, cell_id: String, exec_summary: &str) {
+        let detail = exec_summary
+            .strip_prefix("Command — ")
+            .unwrap_or(exec_summary);
+        if matches!(detail, "exec" | "Command") {
+            return;
+        }
+        if let Some(index) = self
+            .exec_cells
+            .iter()
+            .position(|(known_id, _)| known_id == &cell_id)
+        {
+            self.exec_cells.remove(index);
+        }
+        if self.exec_cells.len() == EXEC_CELL_LIMIT {
+            self.exec_cells.pop_front();
+        }
+        self.exec_cells.push_back((cell_id, detail.to_owned()));
+    }
+
+    fn exec_summary_for_cell(&self, cell_id: &str) -> Option<&str> {
+        self.exec_cells
+            .iter()
+            .rev()
+            .find(|(known_id, _)| known_id == cell_id)
+            .map(|(_, summary)| summary.as_str())
+    }
+
+    fn record_terminal_session(&mut self, session_id: u64, exec_summary: &str) {
+        let Some(command) = exec_summary.strip_prefix("Command — ") else {
+            return;
+        };
+        if command.is_empty() {
+            return;
+        }
+        if let Some(index) = self
+            .terminal_sessions
+            .iter()
+            .position(|(known_id, _)| *known_id == session_id)
+        {
+            self.terminal_sessions.remove(index);
+        }
+        if self.terminal_sessions.len() == TERMINAL_SESSION_LIMIT {
+            self.terminal_sessions.pop_front();
+        }
+        self.terminal_sessions
+            .push_back((session_id, command.to_owned()));
+    }
+
+    fn terminal_command(&self, session_id: u64) -> Option<&str> {
+        self.terminal_sessions
+            .iter()
+            .rev()
+            .find(|(known_id, _)| *known_id == session_id)
+            .map(|(_, command)| command.as_str())
+    }
+
+    fn terminal_io_summary(&self, call: TerminalIoCall) -> String {
+        let action = match call.kind {
+            TerminalIoKind::Poll => "Poll terminal",
+            TerminalIoKind::Write => "Write stdin",
+        };
+        let target = self
+            .terminal_command(call.session_id)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("session {}", call.session_id));
+        sanitise_content(&format!("{action} — {target}"))
     }
 }
 
@@ -654,12 +747,7 @@ fn summary_for_call(payload: &Value) -> String {
 }
 
 fn summary_for_exec(input: &str) -> Option<String> {
-    const INPUT_SCAN_LIMIT: usize = 64 * 1024;
-    let mut end = input.len().min(INPUT_SCAN_LIMIT);
-    while !input.is_char_boundary(end) {
-        end -= 1;
-    }
-    let input = &input[..end];
+    let input = bounded_prefix(input, EXEC_INPUT_SCAN_LIMIT);
     let calls = nested_tool_names(input);
     if calls.is_empty() {
         return None;
@@ -817,7 +905,150 @@ fn direct_tool_detail(name: &str, payload: &Value) -> Option<String> {
     arguments
         .get(key)
         .and_then(Value::as_str)
+        .map(|detail| {
+            if matches!(name, "send_message" | "followup_task") {
+                compact_agent_reference(detail)
+            } else {
+                detail
+            }
+        })
         .map(sanitise_content)
+}
+
+fn bounded_prefix(input: &str, limit: usize) -> &str {
+    let mut end = input.len().min(limit);
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
+fn valid_exec_cell_id(cell_id: &str) -> bool {
+    !cell_id.is_empty()
+        && cell_id.len() <= 64
+        && cell_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn parse_wait_cell_id_or_none(payload: &Value) -> Option<String> {
+    if payload.get("name").and_then(Value::as_str) != Some("wait") {
+        return None;
+    }
+    let arguments = payload.get("arguments").and_then(Value::as_str)?;
+    let arguments: Value = serde_json::from_str(arguments).ok()?;
+    let cell_id = arguments.get("cell_id").and_then(Value::as_str)?;
+    valid_exec_cell_id(cell_id).then(|| cell_id.to_owned())
+}
+
+fn parse_yielded_cell_id_or_none(payload: &Value) -> Option<String> {
+    fn from_text(text: &str) -> Option<String> {
+        const MARKER: &str = "Script running with cell ID ";
+        let text = bounded_prefix(text, EXEC_OUTPUT_SCAN_LIMIT);
+        let cell_id = text
+            .lines()
+            .take(16)
+            .find_map(|line| line.strip_prefix(MARKER))?
+            .split_ascii_whitespace()
+            .next()?;
+        valid_exec_cell_id(cell_id).then(|| cell_id.to_owned())
+    }
+
+    let output = payload.get("output")?;
+    if let Some(text) = output.as_str() {
+        return from_text(text);
+    }
+    output
+        .as_array()?
+        .iter()
+        .take(EXEC_OUTPUT_BLOCK_LIMIT)
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .find_map(from_text)
+}
+
+fn parse_terminal_io_or_none(payload: &Value) -> Option<TerminalIoCall> {
+    if payload.get("name").and_then(Value::as_str) != Some("exec") {
+        return None;
+    }
+    let input = payload.get("input").and_then(Value::as_str)?;
+    let input = bounded_prefix(input, EXEC_INPUT_SCAN_LIMIT);
+    let calls = nested_tool_names(input);
+    if calls.len() != 1 || calls[0] != "write_stdin" {
+        return None;
+    }
+    let session_id = js_u64_property(input, "session_id")?;
+    let chars = js_string_property(input, "chars")?;
+    let kind = if chars.is_empty() {
+        TerminalIoKind::Poll
+    } else {
+        TerminalIoKind::Write
+    };
+    Some(TerminalIoCall { session_id, kind })
+}
+
+fn parse_result_object_or_none(text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.len() > EXEC_OUTPUT_SCAN_LIMIT {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+fn parse_terminal_session_id_or_none(payload: &Value) -> Option<u64> {
+    let output = payload.get("output")?;
+    let result = if let Some(text) = output.as_str() {
+        let (_, result) = text.rsplit_once("Output:\n")?;
+        parse_result_object_or_none(result)
+    } else {
+        output
+            .as_array()?
+            .iter()
+            .take(EXEC_OUTPUT_BLOCK_LIMIT)
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .find_map(parse_result_object_or_none)
+    }?;
+    result.get("session_id").and_then(Value::as_u64)
+}
+
+fn js_u64_property(source: &str, key: &str) -> Option<u64> {
+    let bytes = source.as_bytes();
+    for (index, _) in source.match_indices(key) {
+        if index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_') {
+            continue;
+        }
+        let mut cursor = index + key.len();
+        if bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+        {
+            cursor += 1;
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b':') {
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == start
+            || bytes
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            continue;
+        }
+        if let Ok(value) = source[start..cursor].parse() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn js_string_property(source: &str, key: &str) -> Option<String> {
@@ -1182,7 +1413,15 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 if let Some(scope) = parse_agent_list_scope_or_none(payload) {
                     agent.agent_list_calls.insert(call_id.clone(), scope);
                 }
-                let summary = summary_for_call(payload);
+                let mut summary = summary_for_call(payload);
+                if let Some(terminal_io) = parse_terminal_io_or_none(payload) {
+                    summary = agent.terminal_io_summary(terminal_io);
+                }
+                if let Some(cell_id) = parse_wait_cell_id_or_none(payload) {
+                    if let Some(exec_summary) = agent.exec_summary_for_cell(&cell_id) {
+                        summary = sanitise_content(&format!("wait — {exec_summary}"));
+                    }
+                }
                 let interaction_sequence =
                     agent.start_tool_interaction(&summary, timestamp, ordinal);
                 agent.in_flight_calls.insert(
@@ -1203,6 +1442,15 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 let id = payload["call_id"].as_str().expect("validated call_id");
                 let agent_list_scope = agent.agent_list_calls.remove(id);
                 if let Some(call) = agent.in_flight_calls.remove(id) {
+                    let yielded_cell_id = parse_yielded_cell_id_or_none(payload);
+                    if call.tool_name == "exec" {
+                        if let Some(cell_id) = yielded_cell_id.as_deref() {
+                            agent.record_exec_cell(cell_id.to_owned(), &call.summary);
+                        } else if let Some(session_id) = parse_terminal_session_id_or_none(payload)
+                        {
+                            agent.record_terminal_session(session_id, &call.summary);
+                        }
+                    }
                     if call.tool_name == "list_agents" {
                         if let (Some(scope), Some(observed_at), Some(agent_paths)) = (
                             agent_list_scope,
@@ -1222,7 +1470,12 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                             });
                         }
                     }
-                    agent.finish_tool_interaction(call, timestamp, ToolInteractionState::Returned);
+                    let state = if yielded_cell_id.is_some() {
+                        ToolInteractionState::Yielded
+                    } else {
+                        ToolInteractionState::Returned
+                    };
+                    agent.finish_tool_interaction(call, timestamp, state);
                 }
                 agent.last_activity_at = timestamp;
                 true
@@ -1887,7 +2140,7 @@ mod tests {
             "name": "send_message",
             "arguments": r#"{"target":"/root/reviewer","message":"private body"}"#
         });
-        assert_eq!(summary_for_call(&direct), "Send message — /root/reviewer");
+        assert_eq!(summary_for_call(&direct), "Send message — reviewer");
         assert!(!summary_for_call(&direct).contains("private body"));
 
         let long_query = format!(
@@ -1902,6 +2155,233 @@ mod tests {
         assert!(bounded.len() > TEXT_LIMIT);
         assert!(bounded.ends_with('…'));
     }
+    #[test]
+    fn wait_interaction_resolves_yielded_exec_command() {
+        let mut state = agent();
+        let exec = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "exec",
+                "name": "exec",
+                "input": r#"const result = await tools.exec_command({
+                    cmd:"python3 runningthing.py"
+                });"#
+            }
+        });
+        assert!(reduce(&mut state, &exec));
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "exec",
+                    "output": "Script running with cell ID 147\nWall time: 30 seconds"
+                }
+            })
+        ));
+        assert_eq!(
+            state.interactions.front().unwrap().tool_state,
+            Some(ToolInteractionState::Yielded)
+        );
+
+        let wait = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "wait",
+                "name": "wait",
+                "arguments": r#"{"cell_id":"147","yield_time_ms":30000}"#
+            }
+        });
+        assert!(reduce(&mut state, &wait));
+        assert_eq!(
+            state.interactions.back().unwrap().summary,
+            "wait — python3 runningthing.py"
+        );
+        assert_eq!(
+            state.current_activity(),
+            Some("wait — python3 runningthing.py")
+        );
+
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "wait",
+                    "output": "Script completed"
+                }
+            })
+        ));
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "unknown-wait",
+                    "name": "wait",
+                    "arguments": r#"{"cell_id":"999"}"#
+                }
+            })
+        ));
+        assert_eq!(state.interactions.back().unwrap().summary, "wait");
+    }
+
+    #[test]
+    fn terminal_polls_resolve_originating_commands_and_yields() {
+        let mut state = agent();
+        let command = "source .venv/bin/activate && ops/dev/verify.sh";
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "timestamp": "2026-09-04T03:44:38Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "launch",
+                    "name": "exec",
+                    "input": format!(
+                        "const r=await tools.exec_command({{cmd:\"{command}\",yield_time_ms:1000,tty:true}});text(r);"
+                    )
+                }
+            })
+        ));
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "timestamp": "2026-09-04T03:44:39Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "launch",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "Script completed\nWall time 1.2 seconds\nOutput:\n"
+                        },
+                        {
+                            "type": "input_text",
+                            "text": r#"{"session_id":4129,"output":"still running"}"#
+                        }
+                    ]
+                }
+            })
+        ));
+        assert_eq!(
+            state.interactions.back().unwrap().tool_state,
+            Some(ToolInteractionState::Returned)
+        );
+
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "timestamp": "2026-09-04T03:44:43Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "poll",
+                    "name": "exec",
+                    "input": r#"const r=await tools.write_stdin({session_id:4129,chars:"",yield_time_ms:300000});text(r);"#
+                }
+            })
+        ));
+        assert_eq!(
+            state.current_activity(),
+            Some("Poll terminal — source .venv/bin/activate && ops/dev/verify.sh")
+        );
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "timestamp": "2026-09-04T03:45:14Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "poll",
+                    "output": "Script running with cell ID 253\nWall time 31.0 seconds"
+                }
+            })
+        ));
+        assert_eq!(
+            state.interactions.back().unwrap().tool_state,
+            Some(ToolInteractionState::Yielded)
+        );
+
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "timestamp": "2026-09-04T03:45:15Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "wait",
+                    "name": "wait",
+                    "arguments": r#"{"cell_id":"253","yield_time_ms":300000}"#
+                }
+            })
+        ));
+        assert_eq!(
+            state.current_activity(),
+            Some("wait — Poll terminal — source .venv/bin/activate && ops/dev/verify.sh")
+        );
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "timestamp": "2026-09-04T03:49:43Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "wait",
+                    "output": [
+                        {"type": "input_text", "text": "Script completed\n"}
+                    ]
+                }
+            })
+        ));
+        assert_eq!(
+            state.interactions.back().unwrap().tool_state,
+            Some(ToolInteractionState::Returned)
+        );
+
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "write",
+                    "name": "exec",
+                    "input": r#"const r=await tools.write_stdin({session_id:4129,chars:"\u0003"});text(r);"#
+                }
+            })
+        ));
+        assert_eq!(
+            state.current_activity(),
+            Some("Write stdin — source .venv/bin/activate && ops/dev/verify.sh")
+        );
+        assert!(!state.current_activity().unwrap().contains("\u{3}"));
+
+        assert!(reduce(
+            &mut state,
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "unknown-poll",
+                    "name": "exec",
+                    "input": r#"const r=await tools.write_stdin({session_id:999,chars:""});text(r);"#
+                }
+            })
+        ));
+        assert_eq!(
+            state.current_activity(),
+            Some("Poll terminal — session 999")
+        );
+    }
+
     #[test]
     fn exact_wait_agent_tracks_only_newest_running_call() {
         let mut state = agent();

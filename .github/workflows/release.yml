@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Linux x86-64 release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Verify tag matches Cargo package version
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agentop") | .version')"
+          test "$GITHUB_REF_NAME" = "v$package_version"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Verify package contents
+        run: cargo package --locked
+
+      - name: Build release binary
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          package_version="${GITHUB_REF_NAME#v}"
+          archive_name="agentop-${package_version}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${archive_name}"
+          cp target/x86_64-unknown-linux-gnu/release/agentop "dist/${archive_name}/"
+          cp README.md LICENSE.md "dist/${archive_name}/"
+          tar -C dist -czf "dist/${archive_name}.tar.gz" "${archive_name}"
+          (
+            cd dist
+            sha256sum "${archive_name}.tar.gz" > "${archive_name}.tar.gz.sha256"
+          )
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          package_version="${GITHUB_REF_NAME#v}"
+          archive_name="agentop-${package_version}-x86_64-unknown-linux-gnu"
+          assets=(
+            "dist/${archive_name}.tar.gz"
+            "dist/${archive_name}.tar.gz.sha256"
+          )
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --generate-notes \
+            --verify-tag \
+            --title "Agentop ${package_version}"

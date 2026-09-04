@@ -10,7 +10,10 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Read-only live observer for Codex multi-agent rollouts")]
+#[command(
+    version,
+    about = "Read-only live observer for Codex multi-agent rollouts"
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -159,6 +162,17 @@ mod tests {
         let help = String::from_utf8(help).unwrap();
         assert!(help.contains("--color <COLOR>"));
         assert!(help.contains("[possible values: none, auto]"));
+        assert_eq!(
+            Args::command().get_version(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let version = Args::try_parse_from(["agentop", "--version"])
+            .err()
+            .expect("--version should exit after displaying the version");
+        assert_eq!(version.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(version
+            .to_string()
+            .contains(concat!("agentop ", env!("CARGO_PKG_VERSION"))));
     }
     #[test]
     fn selected_reader_excludes_unrelated_archive_health() {

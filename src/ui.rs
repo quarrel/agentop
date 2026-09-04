@@ -69,6 +69,7 @@ pub enum ColorMode {
     Auto,
 }
 
+const ORANGE: Color = Color::Rgb(255, 165, 0);
 #[derive(Clone, Copy)]
 struct Palette {
     enabled: bool,
@@ -102,8 +103,24 @@ impl Palette {
         self.fg(Color::LightMagenta)
     }
 
-    fn reasoning_effort(self) -> Style {
-        self.fg(Color::LightYellow)
+    fn reasoning_effort(self, effort: &str) -> Style {
+        let color = match effort {
+            "none" | "minimal" => Color::LightGreen,
+            "low" => Color::Green,
+            "medium" => Color::Yellow,
+            "high" => ORANGE,
+            "xhigh" | "max" | "ultra" => Color::Red,
+            _ => Color::LightYellow,
+        };
+        self.fg(color)
+    }
+
+    fn neutral(self) -> Style {
+        self.fg(Color::Gray)
+    }
+
+    fn waiting(self) -> Style {
+        self.fg(ORANGE)
     }
 
     fn good(self) -> Style {
@@ -1014,7 +1031,9 @@ fn tool_state_text(interaction: &AgentInteraction, now: DateTime<Utc>) -> Option
     let state = interaction.tool_state?;
     let duration = match state {
         ToolInteractionState::Open => interaction.timestamp.map(|started| elapsed(started, now)),
-        ToolInteractionState::Returned | ToolInteractionState::EndedWithoutReturn => interaction
+        ToolInteractionState::Yielded
+        | ToolInteractionState::Returned
+        | ToolInteractionState::EndedWithoutReturn => interaction
             .timestamp
             .zip(interaction.finished_at)
             .map(|(started, finished)| elapsed(started, finished)),
@@ -1022,6 +1041,10 @@ fn tool_state_text(interaction: &AgentInteraction, now: DateTime<Utc>) -> Option
     Some(match (state, duration) {
         (ToolInteractionState::Open, Some(duration)) => format!("open for {duration}"),
         (ToolInteractionState::Open, None) => "open".into(),
+        (ToolInteractionState::Yielded, Some(duration)) => {
+            format!("yielded after {duration}")
+        }
+        (ToolInteractionState::Yielded, None) => "yielded".into(),
         (ToolInteractionState::Returned, Some(duration)) => {
             format!("returned after {duration}")
         }
@@ -1036,6 +1059,7 @@ fn tool_state_text(interaction: &AgentInteraction, now: DateTime<Utc>) -> Option
 fn tool_state_style(state: ToolInteractionState, palette: Palette) -> Style {
     match state {
         ToolInteractionState::Open => palette.warning(),
+        ToolInteractionState::Yielded => palette.metadata(),
         ToolInteractionState::Returned => palette.good(),
         ToolInteractionState::EndedWithoutReturn => palette.error(),
     }
@@ -1098,7 +1122,14 @@ fn interaction_detail_lines(
             lines.push(labelled_line("started", timestamp.to_rfc3339(), palette));
         }
         if let Some(finished_at) = interaction.finished_at {
-            lines.push(labelled_line("returned", finished_at.to_rfc3339(), palette));
+            let label = match interaction.tool_state {
+                Some(ToolInteractionState::Yielded) => "yielded",
+                Some(ToolInteractionState::EndedWithoutReturn) => "ended",
+                Some(ToolInteractionState::Open | ToolInteractionState::Returned) | None => {
+                    "returned"
+                }
+            };
+            lines.push(labelled_line(label, finished_at.to_rfc3339(), palette));
         }
     } else {
         if let Some(timestamp) = interaction.timestamp {
@@ -1134,15 +1165,18 @@ fn history_header(
     for (value, style) in [
         (role, palette.role()),
         (agent.model.as_deref(), palette.model()),
-        (
-            agent.reasoning_effort.as_deref(),
-            palette.reasoning_effort(),
-        ),
     ] {
         if let Some(value) = value {
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(render_text(value), style));
         }
+    }
+    if let Some(effort) = agent.reasoning_effort.as_deref() {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::styled(
+            render_text(effort),
+            palette.reasoning_effort(effort),
+        ));
     }
     spans.push(Span::raw(" · "));
     spans.push(Span::styled(
@@ -1345,7 +1379,7 @@ fn tree_line(
     if let Some(effort) = agent.reasoning_effort.as_deref() {
         spans.push(Span::styled(
             format!("{}  ", render_text(effort)),
-            palette.reasoning_effort(),
+            palette.reasoning_effort(effort),
         ));
     }
     spans.push(Span::styled(format!("{status}  "), status_style));
@@ -1423,6 +1457,20 @@ fn detail_lines(
             &mut metadata_spans,
             format!("nickname {}", render_text(nickname)),
             Style::default(),
+        );
+    }
+    if let Some(model) = agent.model.as_deref() {
+        push_detail_value(
+            &mut metadata_spans,
+            format!("model {}", render_text(model)),
+            palette.model(),
+        );
+    }
+    if let Some(effort) = agent.reasoning_effort.as_deref() {
+        push_detail_value(
+            &mut metadata_spans,
+            format!("reasoning {}", render_text(effort)),
+            palette.reasoning_effort(effort),
         );
     }
     push_detail_value(
@@ -1642,11 +1690,14 @@ fn lifecycle_style(
     if stale_evidence.is_some() {
         return palette.warning();
     }
+    if agent.is_waiting_on_agent() {
+        return palette.waiting();
+    }
     match agent.latest_turn.status {
-        TurnStatus::Completed => palette.good(),
+        TurnStatus::Completed => palette.neutral(),
         TurnStatus::Interrupted | TurnStatus::Errored => palette.error(),
         TurnStatus::Pending => palette.warning(),
-        TurnStatus::Running => palette.title(),
+        TurnStatus::Running => palette.good(),
     }
 }
 
@@ -2370,6 +2421,41 @@ mod tests {
     }
 
     #[test]
+    fn yielded_tool_interactions_show_handoff_state() {
+        let started = "2026-09-04T03:44:43Z".parse::<DateTime<Utc>>().unwrap();
+        let yielded = "2026-09-04T03:45:14Z".parse::<DateTime<Utc>>().unwrap();
+        let interaction = AgentInteraction {
+            sequence: 1,
+            kind: InteractionKind::Tool,
+            summary: "Poll terminal — ops/dev/verify.sh".into(),
+            timestamp: Some(started),
+            ordinal: Some(12),
+            tool_state: Some(ToolInteractionState::Yielded),
+            finished_at: Some(yielded),
+        };
+
+        assert_eq!(
+            tool_state_text(&interaction, yielded).as_deref(),
+            Some("yielded after 31.0s")
+        );
+        let lines = interaction_detail_lines(
+            Some((&interaction, 0)),
+            1,
+            yielded,
+            Palette::new(ColorMode::None),
+        );
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line) == "state: yielded after 31.0s"));
+        assert!(lines
+            .iter()
+            .any(|line| line_text(line) == "yielded: 2026-09-04T03:45:14+00:00"));
+        assert!(!lines
+            .iter()
+            .any(|line| line_text(line).starts_with("returned:")));
+    }
+
+    #[test]
     fn interaction_history_opens_at_latest_and_preserves_scrolled_position() {
         let (group, mut state) = fixture();
         {
@@ -2733,7 +2819,7 @@ mod tests {
                 .find(|span| span.content.contains("high"))
                 .unwrap();
             assert_eq!(model_span.style.fg, Some(Color::LightMagenta));
-            assert_eq!(effort_span.style.fg, Some(Color::LightYellow));
+            assert_eq!(effort_span.style.fg, Some(ORANGE));
 
             let details = detail_lines(Some(root), &state, &group, None, palette);
             let details_text = details
@@ -2742,6 +2828,8 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect::<Vec<_>>()
                 .concat();
+            assert!(details_text.contains("model gpt-5.6-sol"));
+            assert!(details_text.contains("reasoning high"));
             for absent in [
                 "schema catalogued",
                 "compatibility ingestable",
@@ -2873,17 +2961,73 @@ mod tests {
             .draw(|frame| draw(frame, &group, &state, &rows, &ui, false, palette))
             .unwrap();
         let tree_cells = tree_terminal.backend().buffer().content();
-        for expected in [
-            Color::Cyan,
-            Color::Blue,
-            Color::LightMagenta,
-            Color::LightYellow,
-        ] {
+        for expected in [Color::Cyan, Color::Blue, Color::LightMagenta, ORANGE] {
             assert!(
                 tree_cells.iter().any(|cell| cell.fg == expected),
                 "tree should render semantic foreground {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn reasoning_and_lifecycle_colours_encode_operational_state() {
+        let palette = Palette::new(ColorMode::Auto);
+        for (effort, expected) in [
+            ("none", Color::LightGreen),
+            ("minimal", Color::LightGreen),
+            ("low", Color::Green),
+            ("medium", Color::Yellow),
+            ("high", ORANGE),
+            ("xhigh", Color::Red),
+            ("max", Color::Red),
+            ("ultra", Color::Red),
+            ("future", Color::LightYellow),
+        ] {
+            assert_eq!(palette.reasoning_effort(effort).fg, Some(expected));
+        }
+
+        let (group, state) = fixture();
+        let mut agent = state.agents["root"].clone();
+        agent.latest_turn.status = TurnStatus::Running;
+        assert_eq!(
+            lifecycle_style(&agent, None, palette).fg,
+            Some(Color::Green)
+        );
+
+        agent.in_flight_calls.insert(
+            "wait".into(),
+            crate::model::InFlightCall {
+                tool_name: "wait_agent".into(),
+                summary: "wait_agent".into(),
+                started_at: None,
+                ordinal: Some(1),
+                sequence: 1,
+                interaction_sequence: 0,
+            },
+        );
+        assert_eq!(lifecycle_style(&agent, None, palette).fg, Some(ORANGE));
+
+        agent.latest_turn.status = TurnStatus::Completed;
+        assert_eq!(lifecycle_style(&agent, None, palette).fg, Some(Color::Gray));
+        assert_eq!(
+            Palette::new(ColorMode::None).reasoning_effort("high").fg,
+            None
+        );
+
+        let details = detail_lines(Some(&agent), &state, &group, None, palette);
+        let metadata = &details[1];
+        assert!(line_text(metadata).contains("model gpt-5.6-sol"));
+        assert!(line_text(metadata).contains("reasoning high"));
+        assert_eq!(
+            metadata
+                .spans
+                .iter()
+                .find(|span| span.content.contains("reasoning high"))
+                .unwrap()
+                .style
+                .fg,
+            Some(ORANGE)
+        );
     }
 
     #[test]
