@@ -963,7 +963,6 @@ fn draw(
     frame.render_widget(
         Paragraph::new(detail_lines(
             selected,
-            state,
             group,
             selected_stale_evidence,
             palette,
@@ -1416,7 +1415,6 @@ fn push_detail_value(spans: &mut Vec<Span<'static>>, value: String, style: Style
 
 fn detail_lines(
     agent: Option<&AgentState>,
-    state: &SessionState,
     group: &SessionGroup,
     stale_evidence: Option<StaleEvidence>,
     palette: Palette,
@@ -1643,20 +1641,6 @@ fn detail_lines(
         lines.push(labelled_line("result", render_detail_text(claim), palette));
     }
 
-    let health = &state.data_health;
-    if health.malformed_records > 0 || health.oversized_records > 0 {
-        let mut issues = Vec::new();
-        if health.malformed_records > 0 {
-            issues.push(format!("malformed {}", health.malformed_records));
-        }
-        if health.oversized_records > 0 {
-            issues.push(format!("oversized {}", health.oversized_records));
-        }
-        lines.push(Line::from(vec![
-            Span::styled("session health: ", palette.title()),
-            Span::styled(issues.join(" · "), palette.error()),
-        ]));
-    }
     lines
 }
 
@@ -1828,7 +1812,7 @@ mod tests {
         let palette = Palette::new(ColorMode::None);
         let stale_evidence = state.stale_evidence(agent);
         let tree = line_text(&tree_line(&row, agent, stale_evidence, palette));
-        let detail = detail_lines(Some(agent), state, group, stale_evidence, palette)
+        let detail = detail_lines(Some(agent), group, stale_evidence, palette)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -1844,7 +1828,6 @@ mod tests {
 
         let details = detail_lines(
             Some(child),
-            &SessionState::default(),
             &group,
             None,
             Palette::new(ColorMode::None),
@@ -1944,7 +1927,7 @@ mod tests {
         let root = state.agents.get("root").unwrap();
         let tree = tree_line(&rows[0], root, None, palette);
         assert!(line_text(&tree).contains("CTX 15%"));
-        let details = detail_lines(Some(root), &state, &group, None, palette);
+        let details = detail_lines(Some(root), &group, None, palette);
         let details = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(details.contains(
             "context: 39,773 / 258,400 input tokens (15%) · +1,773 since previous observation · observed 2026-09-03 10:01:00 UTC"
@@ -1957,7 +1940,7 @@ mod tests {
         let root = state.agents.get("root").unwrap();
         assert!(root.context_usage.is_some());
         assert!(!line_text(&tree_line(&rows[0], root, None, palette)).contains("CTX "));
-        let completed_details = detail_lines(Some(root), &state, &group, None, palette)
+        let completed_details = detail_lines(Some(root), &group, None, palette)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -1970,7 +1953,7 @@ mod tests {
         let root = state.agents.get("root").unwrap();
         let stale_evidence = Some(StaleEvidence::LaterSessionActivity);
         assert!(!line_text(&tree_line(&rows[0], root, stale_evidence, palette)).contains("CTX "));
-        let stale_details = detail_lines(Some(root), &state, &group, stale_evidence, palette)
+        let stale_details = detail_lines(Some(root), &group, stale_evidence, palette)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -2385,7 +2368,6 @@ mod tests {
 
         let details = detail_lines(
             Some(child),
-            &state,
             &group,
             stale_evidence,
             Palette::new(ColorMode::Auto),
@@ -2401,7 +2383,6 @@ mod tests {
 
         let snapshot_details = detail_lines(
             Some(child),
-            &state,
             &group,
             Some(StaleEvidence::LaterAgentListSnapshot),
             Palette::new(ColorMode::Auto),
@@ -2821,7 +2802,7 @@ mod tests {
             assert_eq!(model_span.style.fg, Some(Color::LightMagenta));
             assert_eq!(effort_span.style.fg, Some(ORANGE));
 
-            let details = detail_lines(Some(root), &state, &group, None, palette);
+            let details = detail_lines(Some(root), &group, None, palette);
             let details_text = details
                 .iter()
                 .flat_map(|line| line.spans.iter())
@@ -2857,11 +2838,9 @@ mod tests {
         }
         state.data_health.unknown_records = 31_098;
         state.data_health.unknown_events = 33_270;
-        state.data_health.malformed_records = 8;
-        state.data_health.oversized_records = 2;
 
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(Some(root), &state, &group, None, palette);
+        let details = detail_lines(Some(root), &group, None, palette);
         let details_text = details
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -2870,9 +2849,6 @@ mod tests {
             .concat();
         assert!(details_text.contains("schema missing"));
         assert!(details_text.contains("compatibility unknown"));
-        assert!(details_text.contains("session health: "));
-        assert!(details_text.contains("malformed 8"));
-        assert!(details_text.contains("oversized 2"));
         assert!(!details_text.contains("unknown records"));
         assert!(!details_text.contains("unknown events"));
         assert!(!details_text.contains("latest diagnostic"));
@@ -2882,9 +2858,33 @@ mod tests {
             .filter(|span| {
                 span.content.contains("schema missing")
                     || span.content.contains("compatibility unknown")
-                    || span.content.contains("malformed 8")
             })
             .all(|span| span.style.fg == Some(Color::Red)));
+    }
+
+    #[test]
+    fn details_hide_unactionable_session_health_counts() {
+        let (group, mut state) = fixture();
+        state.data_health.malformed_records = 8;
+        state.data_health.oversized_records = 2;
+
+        let root = state.agents.get("root").unwrap();
+        let details = detail_lines(
+            Some(root),
+            &group,
+            None,
+            Palette::new(ColorMode::Auto),
+        );
+        let details_text = details
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .concat();
+
+        assert!(!details_text.contains("session health:"));
+        assert!(!details_text.contains("malformed 8"));
+        assert!(!details_text.contains("oversized 2"));
     }
 
     #[test]
@@ -2900,7 +2900,6 @@ mod tests {
         let root = state.agents.get("root").unwrap();
         let details = detail_lines(
             Some(root),
-            &state,
             &group,
             None,
             Palette::new(ColorMode::Auto),
@@ -2914,7 +2913,6 @@ mod tests {
         let root = state.agents.get("root").unwrap();
         let details = detail_lines(
             Some(root),
-            &state,
             &group,
             None,
             Palette::new(ColorMode::Auto),
@@ -3014,7 +3012,7 @@ mod tests {
             None
         );
 
-        let details = detail_lines(Some(&agent), &state, &group, None, palette);
+        let details = detail_lines(Some(&agent), &group, None, palette);
         let metadata = &details[1];
         assert!(line_text(metadata).contains("model gpt-5.6-sol"));
         assert!(line_text(metadata).contains("reasoning high"));
