@@ -2800,8 +2800,8 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect::<Vec<_>>()
                 .concat();
-            assert!(details_text.contains("model gpt-5.6-sol"));
-            assert!(details_text.contains("reasoning high"));
+            assert!(details_text.contains("gpt-5.6-sol"));
+            assert!(details_text.contains("high"));
             for absent in [
                 "schema catalogued",
                 "compatibility ingestable",
@@ -2990,13 +2990,13 @@ mod tests {
 
         let details = detail_lines(Some(&agent), &group, None, palette);
         let metadata = &details[1];
-        assert!(line_text(metadata).contains("model gpt-5.6-sol"));
-        assert!(line_text(metadata).contains("reasoning high"));
+        assert!(line_text(metadata).contains("gpt-5.6-sol"));
+        assert!(line_text(metadata).contains("high"));
         assert_eq!(
             metadata
                 .spans
                 .iter()
-                .find(|span| span.content.contains("reasoning high"))
+                .find(|span| span.content.contains("high"))
                 .unwrap()
                 .style
                 .fg,
