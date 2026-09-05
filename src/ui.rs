@@ -1458,11 +1458,7 @@ fn detail_lines(
         );
     }
     if let Some(model) = agent.model.as_deref() {
-        push_detail_value(
-            &mut metadata_spans,
-            render_text(model),
-            palette.model(),
-        );
+        push_detail_value(&mut metadata_spans, render_text(model), palette.model());
     }
     if let Some(effort) = agent.reasoning_effort.as_deref() {
         push_detail_value(
@@ -1826,12 +1822,7 @@ mod tests {
         let child = state.agents.get_mut("child").unwrap();
         child.agent_path = Some("/root/owner/child".into());
 
-        let details = detail_lines(
-            Some(child),
-            &group,
-            None,
-            Palette::new(ColorMode::None),
-        );
+        let details = detail_lines(Some(child), &group, None, Palette::new(ColorMode::None));
         assert_eq!(
             line_text(&details[0]),
             "agent: owner/child · thread child · parent root"
@@ -2869,12 +2860,7 @@ mod tests {
         state.data_health.oversized_records = 2;
 
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(
-            Some(root),
-            &group,
-            None,
-            Palette::new(ColorMode::Auto),
-        );
+        let details = detail_lines(Some(root), &group, None, Palette::new(ColorMode::Auto));
         let details_text = details
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -2898,12 +2884,7 @@ mod tests {
         }
 
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(
-            Some(root),
-            &group,
-            None,
-            Palette::new(ColorMode::Auto),
-        );
+        let details = detail_lines(Some(root), &group, None, Palette::new(ColorMode::Auto));
         let details_text = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(details_text.contains("message: shared completion"));
         assert!(!details_text.contains("activity: shared completion"));
@@ -2911,12 +2892,7 @@ mod tests {
 
         state.agents.get_mut("root").unwrap().final_message = Some("distinct final".into());
         let root = state.agents.get("root").unwrap();
-        let details = detail_lines(
-            Some(root),
-            &group,
-            None,
-            Palette::new(ColorMode::Auto),
-        );
+        let details = detail_lines(Some(root), &group, None, Palette::new(ColorMode::Auto));
         let details_text = details.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(details_text.contains("message: shared completion"));
         assert!(details_text.contains("final: distinct final"));
