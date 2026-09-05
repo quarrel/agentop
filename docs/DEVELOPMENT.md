@@ -102,36 +102,19 @@ Review every provenance, mapping, and schema-family change before committing. Ca
 
 ## Recording the README demo
 
-[VHS by Charmbracelet](https://github.com/charmbracelet/vhs) is a good fit for the animated terminal view: recordings are scripted, repeatable, and can be exported directly as GIF.
+The README GIF records the actual TUI against a newly created temporary directory of synthetic rollout fragments. It never reads mounted Codex sessions. The fragments follow the exact `0.152.1` record shapes exercised by the reducer and discovery tests; they are not captured producer output and do not establish additional compatibility.
 
-Record only a deliberately sanitised session. Put the output at `docs/demo.gif`, then add it immediately below the opening paragraph in the README:
+On Linux, use Node.js, util-linux `script`/`stty`, a DejaVu Sans Mono font, and [agg 1.9.0](https://github.com/asciinema/agg/releases/tag/v1.9.0). These are optional recording tools, not application or normal build dependencies. The Dev Container already provides Node.js; keep the downloaded `agg` binary outside the repository.
 
-```markdown
-![Agentop displaying a live Codex multi-agent session](docs/demo.gif)
+```bash
+AGG=/path/to/agg node scripts/record-demo.mjs
 ```
 
-A minimal tape can look like:
+The script builds Agentop with Cargo, opens a 116-column terminal, navigates the tree and interactions, and appends simulated tool results and completion events through its separate fixture producer. Only that producer writes demo rollouts; Agentop observes them read-only. Temporary fixtures are removed afterwards.
 
-```text
-Output docs/demo.gif
-Set Width 1400
-Set Height 900
-Set FontSize 16
-Set TypingSpeed 20ms
+Outputs are `docs/demo.cast` (asciicast v2 terminal recording) and `docs/demo.gif` (the looping README image). The sequence is repeatable; timestamps reflect the recording time. Review the GIF and cast before committing, including task text, paths, model labels and commands. All displayed tasks and results are invented for the demo. No Codex model is invoked.
 
-Type "agentop --sessions-dir \"$AGENTOP_DEMO_SESSIONS\""
-Enter
-Sleep 3s
-Type "j"
-Sleep 1s
-Enter
-Sleep 2s
-Escape
-Sleep 1s
-Type "q"
-```
-
-Set `AGENTOP_DEMO_SESSIONS` to a temporary directory containing only sanitised rollout fixtures. Review the rendered frames for usernames, home paths, repository names, session/thread IDs, prompts, messages, commands, and tokens before committing the GIF. Do not record directly from a real sessions archive and assume terminal cropping is sufficient.
+To adjust pacing, terminal dimensions or the synthetic scenario, edit `scripts/record-demo.mjs` and regenerate both outputs.
 
 ## Release process
 

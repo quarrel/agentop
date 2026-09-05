@@ -4,6 +4,10 @@
 
 Agentop is a read-only terminal UI for observing Codex multi-agent sessions. It reconstructs agent trees, lifecycle state, recent activity, tool use, interaction history, and context pressure from the rollout JSONL files Codex already writes.
 
+![Agentop showing an agent tree, a readable task announcement, and live completion](docs/demo.gif)
+
+*Actual TUI with synthetic demo data. [Recording script](scripts/record-demo.mjs).*
+
 It works with Codex CLI sessions and sessions created through the Codex IDE extension when their rollout files are available in the same sessions directory. Agentop does not control Codex or require changes to the sessions it observes.
 
 ## Installation
