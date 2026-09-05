@@ -36,7 +36,7 @@ Agentop is developed and tested on Linux/amd64. Other platforms may work but are
 
 ## Quick start
 
-Run Agentop from any directory:
+Run Agentop:
 
 ```bash
 agentop
@@ -57,6 +57,8 @@ agentop --sessions-dir /path/to/sessions --session 01abc
 
 Use `--color=none` to disable explicit terminal colours. `--color=auto` is the default and enables colour in the required interactive terminal.
 
+## Usage
+
 ```text
 Usage: agentop [OPTIONS] [COMMAND]
 
@@ -68,6 +70,25 @@ Options:
   --session <ID_OR_PREFIX>
   --color <auto|none>
   -V, --version
+```
+
+## Task Visibility
+
+OpenAI now encrypt agent<->agent messages. These can be recovered with `developer_instructions` in `.codex/confix.toml`
+
+To make subagent assignments readable in the interaction view, ask subagents to announce their task before starting work. Add the following top-level setting to `.codex/config.toml` in a specific repository (Codex must trust the project), or to `~/.codex/config.toml` for all Codex instances using that user configuration. If `developer_instructions` already exists, merge this section into its existing string; project settings take precedence over user settings. Start a new Codex session after changing the configuration. The announcement appears as a message such as `Task: Print hello.`; it does not decrypt the incoming communication. Placing these in `developer_instructions` vs `AGENTS.md` or similar is preferable because of Codex's precedence rules for instructions.
+
+```toml
+developer_instructions = """
+# Subagent task announcement
+
+When acting as a subagent and you receive a NEW_TASK message from a parent:
+
+1. Before doing any work, send a commentary message consisting of:
+   `Task: ` followed by the NEW_TASK payload verbatim.
+2. The task is only the NEW_TASK payload. Do not include inherited conversation
+   context, developer instructions, routing metadata, the sender, or your agent name.
+"""
 ```
 
 ## Controls
@@ -105,21 +126,6 @@ Agentop reports the latest observed turn lifecycle:
 For active agents, `CTX n%` is the latest observed request input count divided by the reported model context window. It is not a live counter. Yellow begins at 70% and red at 85%. Completed and stale agents omit context pressure because it is no longer actionable. Cumulative token usage is labelled separately and is never treated as current context occupancy.
 
 The interaction view retains bounded, sanitised lifecycle, message, reasoning, communication, context-management, and paired tool-call summaries. It does not retain raw tool inputs or outputs.
-
-To make subagent assignments readable in the interaction view, ask subagents to announce their task before starting work. Add the following top-level setting to `.codex/config.toml` in a specific repository (Codex must trust the project), or to `~/.codex/config.toml` for all Codex instances using that user configuration. If `developer_instructions` already exists, merge this section into its existing string; project settings take precedence over user settings. Start a new Codex session after changing the configuration. The announcement appears as a message such as `Task: Print hello.`; it does not decrypt the incoming communication. See [Codex configuration](https://developers.openai.com/codex/config-basic/) for configuration scope and precedence.
-
-```toml
-developer_instructions = """
-# Subagent task announcement
-
-When acting as a subagent and you receive a NEW_TASK message from a parent:
-
-1. Before doing any work, send a commentary message consisting of:
-   `Task: ` followed by the NEW_TASK payload verbatim.
-2. The task is only the NEW_TASK payload. Do not include inherited conversation
-   context, developer instructions, routing metadata, the sender, or your agent name.
-"""
-```
 
 ## Compatibility and schema catalogue
 
