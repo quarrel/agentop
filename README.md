@@ -14,7 +14,9 @@ It works with Codex CLI sessions and sessions created through the Codex IDE exte
 
 ### Prebuilt Linux binary
 
-Tagged releases publish an x86-64 Linux archive and SHA-256 checksum on the [GitHub Releases](https://github.com/quarrel/agentop/releases) page.
+Tagged releases publish a **64-bit Intel/AMD Linux** (`x86_64`, also called `amd64`) archive and SHA-256 checksum on the [GitHub Releases](https://github.com/quarrel/agentop/releases) page. The binary targets `x86_64-unknown-linux-gnu` and is built on Ubuntu 22.04 using glibc. This is not a 32-bit x86, ARM64, or Alpine/musl build.
+
+Download the `.tar.gz` archive and its `.tar.gz.sha256` file into the same directory, verify with `sha256sum -c <archive>.tar.gz.sha256`, then extract the archive and place the `agentop` executable on your `PATH`.
 
 ### Install from source
 
