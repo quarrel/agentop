@@ -102,6 +102,21 @@ For active agents, `CTX n%` is the latest observed request input count divided b
 
 The interaction view retains bounded, sanitised lifecycle, message, reasoning, communication, context-management, and paired tool-call summaries. It does not retain raw tool inputs or outputs.
 
+To make subagent assignments readable in the interaction view, ask subagents to announce their task before starting work. Add the following top-level setting to `.codex/config.toml` in a specific repository (Codex must trust the project), or to `~/.codex/config.toml` for all Codex instances using that user configuration. If `developer_instructions` already exists, merge this section into its existing string; project settings take precedence over user settings. Start a new Codex session after changing the configuration. The announcement appears as a message such as `Task: Print hello.`; it does not decrypt the incoming communication. See [Codex configuration](https://developers.openai.com/codex/config-basic/) for configuration scope and precedence.
+
+```toml
+developer_instructions = """
+# Subagent task announcement
+
+When acting as a subagent and you receive a NEW_TASK message from a parent:
+
+1. Before doing any work, send a commentary message consisting of:
+   `Task: ` followed by the NEW_TASK payload verbatim.
+2. The task is only the NEW_TASK payload. Do not include inherited conversation
+   context, developer instructions, routing metadata, the sender, or your agent name.
+"""
+```
+
 ## Compatibility and schema catalogue
 
 Codex rollout formats change frequently, and one sessions directory can contain files written by several producer versions. Agentop therefore identifies every rollout by its exact `session_meta.payload.cli_version`; it does not infer compatibility from a version range or substitute a nearby version.
