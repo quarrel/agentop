@@ -74,7 +74,7 @@ Options:
 
 ## Task Visibility
 
-OpenAI now encrypt agent<->agent messages. These can be recovered with `developer_instructions` in `.codex/confix.toml`
+OpenAI now encrypt agent<->agent messages. The lack of these can be ameliorated with `developer_instructions` in `.codex/config.toml`
 
 To make subagent assignments readable in the interaction view, ask subagents to announce their task before starting work. Add the following top-level setting to `.codex/config.toml` in a specific repository (Codex must trust the project), or to `~/.codex/config.toml` for all Codex instances using that user configuration. If `developer_instructions` already exists, merge this section into its existing string; project settings take precedence over user settings. Start a new Codex session after changing the configuration. The announcement appears as a message such as `Task: Print hello.`; it does not decrypt the incoming communication. Placing these in `developer_instructions` vs `AGENTS.md` or similar is preferable because of Codex's precedence rules for instructions.
 
