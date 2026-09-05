@@ -76,7 +76,7 @@ Options:
 
 OpenAI now encrypt agent<->agent messages. The lack of these can be ameliorated with `developer_instructions` in `.codex/config.toml`
 
-To make subagent assignments readable in the interaction view, ask subagents to announce their task before starting work. Add the following top-level setting to `.codex/config.toml` in a specific repository (Codex must trust the project), or to `~/.codex/config.toml` for all Codex instances using that user configuration. If `developer_instructions` already exists, merge this section into its existing string; project settings take precedence over user settings. Start a new Codex session after changing the configuration. The announcement appears as a message such as `Task: Print hello.`; it does not decrypt the incoming communication. Placing these in `developer_instructions` vs `AGENTS.md` or similar is preferable because of Codex's precedence rules for instructions.
+To make subagent assignments readable in the interaction view, ask agents to announce their task before starting work and to announce any messages they receive. Add the following top-level setting to `.codex/config.toml` in a specific repository (Codex must trust the project), or to `~/.codex/config.toml` for all Codex instances using that user configuration. If `developer_instructions` already exists, merge this section into its existing string; project settings take precedence over user settings. Start a new Codex session after changing the configuration. Placing these in `developer_instructions` vs `AGENTS.md` or similar is preferable because of Codex's precedence rules for instructions.
 
 ```toml
 developer_instructions = """
@@ -88,6 +88,18 @@ When acting as a subagent and you receive a NEW_TASK message from a parent:
    `Task: ` followed by the NEW_TASK payload verbatim.
 2. The task is only the NEW_TASK payload. Do not include inherited conversation
    context, developer instructions, routing metadata, the sender, or your agent name.
+
+# Inter-agent message announcement
+
+When you receive an inter-agent MESSAGE or FINAL_ANSWER:
+
+1. Before doing further work, send a commentary message consisting of:
+   `Received from ` followed by the sender, then `: ` followed by the
+   message payload verbatim.
+2. Include only that message's payload. Do not include inherited
+   conversation context, developer instructions, or routing metadata
+   other than the sender.
+3. This applies to root agents and subagents.
 """
 ```
 
