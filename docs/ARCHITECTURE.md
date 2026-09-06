@@ -44,7 +44,7 @@ Discovery recursively considers `rollout-*.jsonl` and reads only enough metadata
 
 The global browser orders groups by the greatest observed rollout-file modification time, falling back to the greatest session metadata timestamp. This is file/metadata recency, not proof that a session is active.
 
-After a session opens, bounded rescans recover newly created child files. A correlated `spawn_agent` result can prioritise the likely date directory, but it is only a discovery hint. The child is admitted only when its own metadata confirms the displayed session ID.
+After a session opens, bounded rescans recover newly created child files. The reader retains paths already classified by the initial archive discovery, including other sessions, so they do not enter the pending queue again and delay new children. Incomplete headers remain pending. A correlated `spawn_agent` result can prioritise the likely date directory, but it is only a discovery hint. The child is admitted only when its own metadata confirms the displayed session ID.
 
 ## Incremental input
 

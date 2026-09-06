@@ -2,7 +2,7 @@ use crate::model::{
     AgentInteraction, AgentState, CoverageLevel, DataHealth, InteractionKind, SessionState,
     StaleEvidence, ToolInteractionState, TurnStatus, CONTENT_TEXT_LIMIT,
 };
-use crate::rollout::{self, Discovery, PollOutcome, SelectedReader, SessionGroup};
+use crate::rollout::{self, PollOutcome, SelectedReader, SessionGroup};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crossterm::{
@@ -591,17 +591,12 @@ fn browser_loop(
     loop {
         let discovery = rollout::discover(sessions_dir)
             .with_context(|| format!("discover sessions under {}", sessions_dir.display()))?;
-        let Discovery {
-            admitted,
-            pending,
-            health,
-        } = discovery;
-        let groups = rollout::group(admitted);
+        let groups = rollout::group(discovery.admitted.clone());
         picker.synchronise(&groups);
         match BrowserMode::after_picker(picker_loop(
             terminal,
             &groups,
-            &health,
+            &discovery.health,
             &mut picker,
             palette,
         )?) {
@@ -611,7 +606,7 @@ fn browser_loop(
                 let selected = rollout::select(&groups, Some(&session_id))?.clone();
                 let mut reader = SelectedReader::new(
                     selected,
-                    pending,
+                    discovery,
                     sessions_dir.to_owned(),
                     catalogue_dir.to_owned(),
                 )?;

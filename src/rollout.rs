@@ -676,10 +676,15 @@ pub struct SelectedReader {
 impl SelectedReader {
     pub fn new(
         group: SessionGroup,
-        pending: Vec<PathBuf>,
+        discovery: Discovery,
         sessions_root: PathBuf,
         catalogue_dir: PathBuf,
     ) -> Result<Self> {
+        let Discovery {
+            admitted,
+            pending,
+            health: _archive_health,
+        } = discovery;
         let root = group.rollouts[group.root].clone();
         let mut state = SessionState {
             session_id: group.session_id.clone(),
@@ -749,6 +754,7 @@ impl SelectedReader {
             .rollouts
             .iter()
             .map(|meta| meta.path.clone())
+            .chain(admitted.into_iter().map(|meta| meta.path))
             .chain(pending.iter().cloned())
             .collect();
         let discovery_scan = discovery_scan(&sessions_root);
@@ -1266,7 +1272,7 @@ mod tests {
         };
         let mut reader = SelectedReader::new(
             group,
-            Vec::new(),
+            Discovery::default(),
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -1314,7 +1320,7 @@ mod tests {
         };
         let mut reader = SelectedReader::new(
             group,
-            Vec::new(),
+            Discovery::default(),
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -1364,7 +1370,7 @@ mod tests {
         let (expected, expected_cursors) = load_group(&group, temp.path()).unwrap();
         let mut reader = SelectedReader::new(
             group,
-            Vec::new(),
+            Discovery::default(),
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -1456,7 +1462,7 @@ mod tests {
         };
         let mut reader = SelectedReader::new(
             group,
-            Vec::new(),
+            Discovery::default(),
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -1660,14 +1666,10 @@ mod tests {
         std::fs::write(&child, "{\"type\":\"session_meta\"").unwrap();
         let discovery = discover(t.path()).unwrap();
         assert_eq!(discovery.pending, vec![child.clone()]);
-        let group = group(discovery.admitted).pop().unwrap();
-        let mut reader = SelectedReader::new(
-            group,
-            discovery.pending,
-            t.path().to_owned(),
-            t.path().to_owned(),
-        )
-        .unwrap();
+        let group = group(discovery.admitted.clone()).pop().unwrap();
+        let mut reader =
+            SelectedReader::new(group, discovery, t.path().to_owned(), t.path().to_owned())
+                .unwrap();
         finish_initial_load(&mut reader);
         std::fs::write(&child, concat!(
             "{bad}\n",
@@ -1717,9 +1719,13 @@ mod tests {
         std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"s\",\"cli_version\":\"0.149.0\",\"subagent_history_start_ordinal\":5}}\n").unwrap();
         let discovery = discover(t.path()).unwrap();
         let group = group(discovery.admitted).pop().unwrap();
-        let mut reader =
-            SelectedReader::new(group, Vec::new(), t.path().to_owned(), t.path().to_owned())
-                .unwrap();
+        let mut reader = SelectedReader::new(
+            group,
+            Discovery::default(),
+            t.path().to_owned(),
+            t.path().to_owned(),
+        )
+        .unwrap();
         finish_initial_load(&mut reader);
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -1760,10 +1766,10 @@ mod tests {
         std::fs::write(&root, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"s\",\"cli_version\":\"0.149.0-alpha.4.1\"}}\n").unwrap();
 
         let discovery = discover(temp.path()).unwrap();
-        let group = group(discovery.admitted).pop().unwrap();
+        let group = group(discovery.admitted.clone()).pop().unwrap();
         let mut reader = SelectedReader::new(
             group,
-            discovery.pending,
+            discovery,
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -1859,7 +1865,7 @@ mod tests {
 
         let mut reader = SelectedReader::new(
             groups[0].clone(),
-            Vec::new(),
+            Discovery::default(),
             t.path().to_owned(),
             t.path().to_owned(),
         )
@@ -1948,10 +1954,10 @@ mod tests {
             .unwrap();
         }
         let discovery = discover(temp.path()).unwrap();
-        let selected = group(discovery.admitted).pop().unwrap();
+        let selected = group(discovery.admitted.clone()).pop().unwrap();
         let mut reader = SelectedReader::new(
             selected,
-            discovery.pending,
+            discovery,
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -2033,10 +2039,10 @@ mod tests {
             paths.push(path);
         }
         let discovery = discover(temp.path()).unwrap();
-        let selected = group(discovery.admitted).pop().unwrap();
+        let selected = group(discovery.admitted.clone()).pop().unwrap();
         let mut reader = SelectedReader::new(
             selected,
-            discovery.pending,
+            discovery,
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -2133,7 +2139,7 @@ mod tests {
         let selected = group(discovery.admitted).pop().unwrap();
         let mut reader = SelectedReader::new(
             selected,
-            Vec::new(),
+            Discovery::default(),
             temp.path().to_owned(),
             temp.path().to_owned(),
         )
@@ -2230,7 +2236,7 @@ mod tests {
         let selected = group(discovery.admitted).pop().unwrap();
         let mut reader = SelectedReader::new(
             selected,
-            Vec::new(),
+            Discovery::default(),
             temp.path().to_owned(),
             temp.path().to_owned(),
         )

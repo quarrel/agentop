@@ -61,14 +61,9 @@ fn open_selected_reader(
     dir: PathBuf,
     catalogue_dir: PathBuf,
 ) -> Result<rollout::SelectedReader> {
-    let rollout::Discovery {
-        admitted,
-        pending,
-        health: _archive_health,
-    } = discovery;
-    let groups = rollout::group(admitted);
+    let groups = rollout::group(discovery.admitted.clone());
     let selected = rollout::select(&groups, Some(requested))?.clone();
-    rollout::SelectedReader::new(selected, pending, dir, catalogue_dir)
+    rollout::SelectedReader::new(selected, discovery, dir, catalogue_dir)
 }
 
 fn run() -> Result<()> {
@@ -206,5 +201,50 @@ mod tests {
 
         assert_eq!(reader.state.data_health.unknown_records, 0);
         assert!(reader.state.data_health.recent_diagnostics.is_empty());
+    }
+    #[test]
+    fn live_child_is_not_delayed_by_previously_discovered_other_sessions() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let day = temp.path().join("2026/09/06");
+        fs::create_dir_all(&day).unwrap();
+        let root = day.join("rollout-root.jsonl");
+        fs::write(&root, "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"session\",\"id\":\"root\",\"cli_version\":\"0.152.1\"}}\n").unwrap();
+        for index in 0..32 {
+            let mut file =
+                fs::File::create(day.join(format!("rollout-other-{index}.jsonl"))).unwrap();
+            writeln!(file, "{}", serde_json::json!({
+                "type": "session_meta",
+                "payload": {"session_id": format!("other-{index}"), "id": format!("other-{index}"), "cli_version": "0.152.1"}
+            })).unwrap();
+            file.set_len((rollout::APPEND_BUDGET * 2) as u64).unwrap();
+        }
+        let mut reader = open_selected_reader(
+            rollout::discover(temp.path()).unwrap(),
+            "session",
+            temp.path().to_owned(),
+            temp.path().join("catalogue"),
+        )
+        .unwrap();
+        while reader.is_loading() {
+            reader.poll().unwrap();
+        }
+        fs::write(day.join("rollout-child.jsonl"), "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"session\",\"id\":\"child\",\"parent_thread_id\":\"root\",\"agent_path\":\"/root/child\",\"cli_version\":\"0.152.1\"}}\n").unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&root).unwrap();
+        for payload in [
+            serde_json::json!({"type":"function_call","name":"spawn_agent","call_id":"spawn","arguments":"{}"}),
+            serde_json::json!({"type":"function_call_output","call_id":"spawn","output":"{\"task_name\":\"/root/child\"}"}),
+        ] {
+            writeln!(file, "{}", serde_json::json!({"timestamp":"2026-09-06T09:00:00Z","type":"response_item","payload":payload})).unwrap();
+        }
+        for _ in 0..3 {
+            reader.poll().unwrap();
+        }
+        assert!(
+            reader.state.agents.contains_key("child"),
+            "a live child must not wait behind already classified unrelated rollouts"
+        );
+        assert_eq!(reader.state.agents.len(), 2);
+        assert_eq!(reader.state.data_health.malformed_records, 0);
     }
 }
