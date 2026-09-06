@@ -1738,6 +1738,7 @@ mod tests {
             reader.state.agents["s"].latest_turn.status,
             crate::model::TurnStatus::Pending
         );
+        assert_eq!(reader.state.agents["s"].metrics.turns, 0);
         file.write_all(
             b"{\"ordinal\":5,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
         )
@@ -1747,6 +1748,7 @@ mod tests {
             reader.state.agents["s"].latest_turn.status,
             crate::model::TurnStatus::Running
         );
+        assert_eq!(reader.state.agents["s"].metrics.turns, 1);
     }
 
     #[test]

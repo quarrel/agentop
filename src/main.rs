@@ -2,6 +2,7 @@ mod model;
 mod rollout;
 mod schema;
 mod schema_sync;
+mod summary;
 mod ui;
 
 use anyhow::{bail, Context, Result};

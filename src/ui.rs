@@ -177,8 +177,29 @@ struct UiState {
     selected_thread: Option<String>,
     hide_completed: bool,
     history: Option<HistoryState>,
+    summary: Option<SummarySelection>,
     catching_up: bool,
     last_change: Option<Instant>,
+}
+
+#[derive(Default)]
+struct SummarySelection {
+    row: usize,
+    agent_row: Option<(String, usize)>,
+}
+
+impl SummarySelection {
+    fn index(&self, rows: &[SummaryRow]) -> usize {
+        self.agent_row
+            .as_ref()
+            .and_then(|(id, offset)| {
+                rows.iter()
+                    .position(|row| row.thread_id.as_ref() == Some(id))
+                    .map(|index| index + offset)
+            })
+            .unwrap_or(self.row)
+            .min(rows.len().saturating_sub(1))
+    }
 }
 
 struct HistoryState {
@@ -309,6 +330,40 @@ impl UiState {
         });
     }
 
+    fn move_summary(&mut self, state: &SessionState, delta: isize, loading: bool) {
+        if let Some(selected) = self.summary.as_mut() {
+            let rows = summary_rows(state, Utc::now(), loading || self.catching_up);
+            let index = selected
+                .index(&rows)
+                .saturating_add_signed(delta)
+                .min(rows.len().saturating_sub(1));
+            selected.row = index;
+            selected.agent_row = rows
+                .get(index)
+                .and_then(|row| row.thread_id.as_ref())
+                .map(|id| {
+                    let first = rows
+                        .iter()
+                        .position(|row| row.thread_id.as_ref() == Some(id))
+                        .expect("selected agent row exists");
+                    (id.clone(), index - first)
+                });
+        }
+    }
+
+    fn open_summary_agent(&mut self, state: &SessionState, loading: bool) {
+        if let Some(selected) = self.summary.as_ref() {
+            let rows = summary_rows(state, Utc::now(), loading || self.catching_up);
+            if let Some(id) = rows
+                .get(selected.index(&rows))
+                .and_then(|row| row.thread_id.clone())
+            {
+                self.selected_thread = Some(id);
+                self.open_history(state);
+            }
+        }
+    }
+
     fn close_history(&mut self) -> bool {
         self.history.take().is_some()
     }
@@ -428,7 +483,7 @@ fn event_loop(
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') => return Ok(TreeExit::Quit),
                     KeyCode::Esc => {
-                        if ui.close_history() {
+                        if ui.close_history() || ui.summary.take().is_some() {
                             dirty = true;
                         } else {
                             return Ok(TreeExit::Back);
@@ -437,6 +492,8 @@ fn event_loop(
                     KeyCode::Up | KeyCode::Char('k') => {
                         if ui.history.is_some() {
                             ui.move_history(&reader.state, -1);
+                        } else if ui.summary.is_some() {
+                            ui.move_summary(&reader.state, -1, reader.is_loading());
                         } else {
                             ui.move_selection(&rows, -1);
                         }
@@ -445,6 +502,8 @@ fn event_loop(
                     KeyCode::Down | KeyCode::Char('j') => {
                         if ui.history.is_some() {
                             ui.move_history(&reader.state, 1);
+                        } else if ui.summary.is_some() {
+                            ui.move_summary(&reader.state, 1, reader.is_loading());
                         } else {
                             ui.move_selection(&rows, 1);
                         }
@@ -452,9 +511,35 @@ fn event_loop(
                     }
                     KeyCode::Enter => {
                         if ui.history.is_none() {
-                            ui.open_history(&reader.state);
+                            if ui.summary.is_some() {
+                                ui.open_summary_agent(&reader.state, reader.is_loading());
+                            } else {
+                                ui.open_history(&reader.state);
+                            }
                             dirty = true;
                         }
+                    }
+                    KeyCode::Char('s') if ui.history.is_none() => {
+                        ui.summary = if ui.summary.is_some() {
+                            None
+                        } else {
+                            Some(SummarySelection::default())
+                        };
+                        dirty = true;
+                    }
+                    KeyCode::PageDown | KeyCode::PageUp
+                        if ui.summary.is_some() && ui.history.is_none() =>
+                    {
+                        ui.move_summary(
+                            &reader.state,
+                            if key.code == KeyCode::PageDown {
+                                10
+                            } else {
+                                -10
+                            },
+                            reader.is_loading(),
+                        );
+                        dirty = true;
                     }
                     KeyCode::Char('r') => {
                         last_update_started = Instant::now();
@@ -462,7 +547,7 @@ fn event_loop(
                         note_poll(&mut ui, outcome);
                         dirty = true;
                     }
-                    KeyCode::Char('h') if ui.history.is_none() => {
+                    KeyCode::Char('h') if ui.history.is_none() && ui.summary.is_none() => {
                         ui.toggle_completed();
                         dirty = true;
                     }
@@ -880,7 +965,10 @@ fn draw(
         draw_history(frame, state, history, loading, ui.catching_up, palette);
         return;
     }
-
+    if let Some(selected) = ui.summary.as_ref() {
+        draw_summary(frame, state, selected, loading || ui.catching_up, palette);
+        return;
+    }
     let agent_panel_height = list_panel_height(area.height, rows.len(), 42);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -979,13 +1067,379 @@ fn draw(
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "↑/↓ or j/k select   Enter interactions   r rescan   h {} completed   Esc back   q quit",
+            "↑/↓ j/k select   Enter interactions   s summary   r rescan   h {} completed   Esc back   q quit",
             if ui.hide_completed { "show" } else { "hide" }
         )),
         chunks[3],
     );
 }
 
+struct SummaryRow {
+    text: String,
+    thread_id: Option<String>,
+}
+
+fn metric_duration(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else if ms < 3_600_000 {
+        format!("{}m {:02}s", ms / 60_000, ms / 1000 % 60)
+    } else {
+        format!(
+            "{}h {:02}m {:02}s",
+            ms / 3_600_000,
+            ms / 60_000 % 60,
+            ms / 1000 % 60
+        )
+    }
+}
+
+fn token_sum(values: impl Iterator<Item = Option<u64>>, agents: usize) -> String {
+    let mut total = 0u128;
+    let mut covered = 0;
+    for value in values.flatten() {
+        total += u128::from(value);
+        covered += 1;
+    }
+    if covered == 0 {
+        "n/a".into()
+    } else {
+        format!("{} ({covered}/{agents} agents)", exact_tokens(total))
+    }
+}
+
+fn summary_rows(state: &SessionState, now: DateTime<Utc>, loading: bool) -> Vec<SummaryRow> {
+    use crate::summary::{role, RunSummary, Times};
+    let summary = RunSummary::new(state, now, loading);
+    let mut rows = Vec::new();
+    let mut push = |text: String| {
+        rows.push(SummaryRow {
+            text,
+            thread_id: None,
+        })
+    };
+    push(format!(
+        "Elapsed span: {}{} · {} agents · {} observed turns",
+        summary.elapsed_ms.map_or("n/a".into(), metric_duration),
+        if !summary.timing_complete {
+            " (partial timing)"
+        } else if summary.live {
+            " (live)"
+        } else {
+            " (observed)"
+        },
+        summary.agents.len(),
+        summary
+            .agents
+            .iter()
+            .map(|a| a.agent.metrics.turns)
+            .sum::<u64>()
+    ));
+    push(format!(
+        "Summed observed agent turn time: {} · outside tools: {}",
+        metric_duration(summary.times.agent_ms),
+        metric_duration(summary.times.outside_tools_ms())
+    ));
+    push(format!(
+        "Tool/wait time (union per agent): {}",
+        metric_duration(summary.times.tool_ms)
+    ));
+    push(format!(
+        "Wait subsets: agents {} · exec/polls {} (subsets may overlap)",
+        metric_duration(summary.times.agent_wait_ms),
+        metric_duration(summary.times.exec_wait_ms)
+    ));
+    push("Thinking time: unavailable; outside-tools time includes inference, network and other gaps.".into());
+    push(format!(
+        "Concurrency (running turns, includes waits): peak {} · average {}",
+        summary
+            .peak_concurrency
+            .map_or("n/a".into(), |n| n.to_string()),
+        summary
+            .average_concurrency
+            .map_or("n/a".into(), |n| format!("{n:.2}"))
+    ));
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for a in &summary.agents {
+        *counts
+            .entry(if a.stale {
+                "STALE"
+            } else {
+                status(a.agent.latest_turn.status)
+            })
+            .or_default() += 1;
+    }
+    push(
+        counts
+            .iter()
+            .map(|(status, n)| format!("{status} {n}"))
+            .collect::<Vec<_>>()
+            .join(" · "),
+    );
+    push("TOKEN COUNTERS · latest reported cumulative snapshot per agent".into());
+    let total = |field: fn(&crate::summary::Tokens) -> Option<u64>| {
+        token_sum(
+            summary
+                .agents
+                .iter()
+                .map(|a| field(&a.agent.metrics.tokens)),
+            summary.agents.len(),
+        )
+    };
+    push(format!(
+        "Total {} · input {}",
+        total(|t| t.total),
+        total(|t| t.input)
+    ));
+    push(format!(
+        "Cached input {} · output {}",
+        total(|t| t.cached),
+        total(|t| t.output)
+    ));
+    push(format!(
+        "Reasoning output {} (included in output; cached is included in input)",
+        total(|t| t.reasoning)
+    ));
+    push("Reported counters can include inherited baselines; these are not billing or unique-run totals.".into());
+    push("EVIDENCE & DIAGNOSTICS".into());
+    let health = &state.data_health;
+    push(format!(
+        "Malformed {} · oversized {} · unknown records/events {}/{}",
+        health.malformed_records,
+        health.oversized_records,
+        health.unknown_records,
+        health.unknown_events
+    ));
+    let gaps: u64 = summary
+        .agents
+        .iter()
+        .map(|a| a.agent.metrics.timing_gaps)
+        .sum();
+    let incomplete: u64 = summary.tools.values().map(|t| t.incomplete).sum();
+    let open: usize = summary
+        .agents
+        .iter()
+        .map(|a| a.agent.in_flight_calls.len())
+        .sum();
+    let unmatched: u64 = summary
+        .agents
+        .iter()
+        .map(|a| a.agent.metrics.unmatched_outputs)
+        .sum();
+    let missing_starts = summary
+        .agents
+        .iter()
+        .filter(|a| a.agent.metrics.first_start.is_none())
+        .count();
+    push(format!("Timing gaps {gaps} · no turn start {missing_starts} · incomplete calls {incomplete} · open {open}"));
+    push(format!(
+        "Unmatched outputs {unmatched} · replaced unfinished turns {} · counter decreases {}",
+        summary
+            .agents
+            .iter()
+            .map(|a| a.agent.metrics.incomplete_turns)
+            .sum::<u64>(),
+        summary
+            .agents
+            .iter()
+            .map(|a| a.agent.metrics.token_decreases)
+            .sum::<u64>()
+    ));
+    let missing_parents = summary
+        .agents
+        .iter()
+        .filter(|a| {
+            a.agent
+                .parent_thread_id
+                .as_ref()
+                .is_some_and(|parent| !state.agents.contains_key(parent))
+        })
+        .count();
+    push(format!(
+        "Missing parent rollouts {missing_parents} · compactions {} · peak context {}",
+        summary
+            .agents
+            .iter()
+            .map(|a| a.agent.metrics.compactions)
+            .sum::<u64>(),
+        summary
+            .agents
+            .iter()
+            .filter_map(|a| a.agent.metrics.peak_context_percent)
+            .max()
+            .map_or("n/a".into(), |p| format!("{p}%"))
+    ));
+    let discovered = state
+        .agents
+        .values()
+        .filter_map(|a| a.agent_path.as_deref())
+        .collect::<HashSet<_>>();
+    let spawned = summary
+        .agents
+        .iter()
+        .flat_map(|a| a.agent.metrics.spawned_paths.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let missing_children = spawned.difference(&discovered).count();
+    push(format!("Known spawned children not discovered: {missing_children} · capped turn intervals {} · dropped spawn hints {}",
+        summary.agents.iter().map(|a| a.agent.metrics.dropped_intervals).sum::<u64>(),
+        summary.agents.iter().map(|a| a.agent.metrics.dropped_spawn_hints).sum::<u64>()));
+    push("Coverage: discovered rollouts only; unavailable children and pending data can change totals.".into());
+    push("Stale agents stop at observed evidence. Missing/capped timing makes concurrency unavailable.".into());
+    push("BY ROLE · summed observed agent time, including concurrent work".into());
+    let mut roles = std::collections::BTreeMap::<&str, (Times, Vec<&AgentState>)>::new();
+    for a in &summary.agents {
+        let entry = roles.entry(role(a.agent)).or_default();
+        entry.0.add(a.times);
+        entry.1.push(a.agent);
+    }
+    for (role, (times, agents)) in roles {
+        push(format!(
+            "{} · {} agents · turn {} · tools {}",
+            render_text(role),
+            agents.len(),
+            metric_duration(times.agent_ms),
+            metric_duration(times.tool_ms)
+        ));
+        push(format!(
+            "  wait agents {} · exec {} · outside tools {}",
+            metric_duration(times.agent_wait_ms),
+            metric_duration(times.exec_wait_ms),
+            metric_duration(times.outside_tools_ms())
+        ));
+        push(format!(
+            "  tokens {} · input {} · output {}",
+            token_sum(agents.iter().map(|a| a.metrics.tokens.total), agents.len()),
+            token_sum(agents.iter().map(|a| a.metrics.tokens.input), agents.len()),
+            token_sum(agents.iter().map(|a| a.metrics.tokens.output), agents.len())
+        ));
+    }
+    push("TOOLS · sum of paired call latencies; overlapping calls can exceed agent time".into());
+    let mut tools = summary.tools.iter().collect::<Vec<_>>();
+    tools.sort_by(|(an, a), (bn, b)| b.latency_ms.cmp(&a.latency_ms).then_with(|| an.cmp(bn)));
+    for (name, t) in tools {
+        push(format!(
+            "{} · {} calls · {} timed · latency {} · longest {}",
+            render_text(name),
+            t.calls,
+            t.paired,
+            metric_duration(t.latency_ms),
+            metric_duration(t.longest_ms)
+        ));
+        push(format!("  yielded {} · incomplete {} · only outer calls counted; background execution may continue",
+            t.yielded, t.incomplete));
+    }
+    push("AGENTS · select any agent row and press Enter for interactions".into());
+    for a in &summary.agents {
+        let agent = a.agent;
+        rows.push(SummaryRow {
+            text: format!(
+                "{} · {} · {} · turn {} · tokens {}",
+                render_text(agent_label(agent)),
+                render_text(role(agent)),
+                if a.stale {
+                    "STALE"
+                } else {
+                    status(agent.latest_turn.status)
+                },
+                metric_duration(a.times.agent_ms),
+                agent
+                    .metrics
+                    .tokens
+                    .total
+                    .map_or("n/a".into(), exact_tokens)
+            ),
+            thread_id: Some(agent.thread_id.clone()),
+        });
+        rows.push(SummaryRow {
+            text: format!(
+                "  tools {} · wait agents {} · exec {} · outside {} · CTX peak {} · compactions {}",
+                metric_duration(a.times.tool_ms),
+                metric_duration(a.times.agent_wait_ms),
+                metric_duration(a.times.exec_wait_ms),
+                metric_duration(a.times.outside_tools_ms()),
+                agent
+                    .metrics
+                    .peak_context_percent
+                    .map_or("n/a".into(), |p| format!("{p}%")),
+                agent.metrics.compactions
+            ),
+            thread_id: Some(agent.thread_id.clone()),
+        });
+    }
+    rows
+}
+
+fn draw_summary(
+    frame: &mut Frame,
+    state: &SessionState,
+    selected: &SummarySelection,
+    loading: bool,
+    palette: Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+    frame.render_widget(
+        Paragraph::new(format!(
+            "agentop · orchestration summary{}",
+            if loading {
+                " · partial / loading history…"
+            } else {
+                ""
+            }
+        ))
+        .style(palette.title()),
+        chunks[0],
+    );
+    let rows = summary_rows(state, Utc::now(), loading);
+    let mut selection = ListState::default();
+    selection.select(Some(selected.index(&rows)));
+    frame.render_stateful_widget(
+        List::new(
+            rows.into_iter()
+                .map(|row| {
+                    let heading = [
+                        "TOKEN COUNTERS",
+                        "EVIDENCE &",
+                        "BY ROLE",
+                        "TOOLS ·",
+                        "AGENTS ·",
+                    ]
+                    .iter()
+                    .any(|prefix| row.text.starts_with(prefix));
+                    ListItem::new(row.text).style(if heading {
+                        palette.title()
+                    } else {
+                        palette.neutral()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .block(
+            Block::default()
+                .title(" run summary · scroll for roles, tools and agents ")
+                .borders(Borders::ALL)
+                .border_style(palette.title()),
+        )
+        .highlight_style(palette.selection())
+        .highlight_symbol("› "),
+        chunks[1],
+        &mut selection,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "↑/↓ j/k scroll · PgUp/PgDn · Enter agent interactions · s/Esc back · q quit",
+        ),
+        chunks[2],
+    );
+}
 fn interaction_kind(kind: InteractionKind) -> &'static str {
     match kind {
         InteractionKind::Lifecycle => "lifecycle",
@@ -1303,8 +1757,8 @@ fn draw_history(
     );
 }
 
-fn exact_tokens(value: u64) -> String {
-    let digits = value.to_string();
+fn exact_tokens(value: impl Into<u128>) -> String {
+    let digits = value.into().to_string();
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
@@ -1848,6 +2302,7 @@ mod tests {
                 ordinal: Some(1),
                 sequence: 1,
                 interaction_sequence: 0,
+                timing_kind: crate::summary::CallKind::AgentWait,
             },
         );
         let (tree, detail) = rendered_agent(&agent, &group, &state);
@@ -1864,6 +2319,7 @@ mod tests {
                 ordinal: Some(2),
                 sequence: 2,
                 interaction_sequence: 1,
+                timing_kind: crate::summary::CallKind::Tool,
             },
         );
         let (tree, detail) = rendered_agent(&agent, &group, &state);
@@ -2977,6 +3433,7 @@ mod tests {
                 ordinal: Some(1),
                 sequence: 1,
                 interaction_sequence: 0,
+                timing_kind: crate::summary::CallKind::AgentWait,
             },
         );
         assert_eq!(lifecycle_style(&agent, None, palette).fg, Some(ORANGE));
@@ -3055,5 +3512,93 @@ mod tests {
             .draw(|frame| draw(frame, &group, &state, &rows, &ui, false, palette))
             .unwrap();
         assert_reset_colours(&tiny_tree);
+    }
+
+    #[test]
+    fn summary_navigation_includes_hidden_agents_and_returns_from_interactions() {
+        let (group, mut state) = fixture();
+        state.agents.get_mut("child").unwrap().latest_turn.status = TurnStatus::Completed;
+        let rows = summary_rows(&state, Utc::now(), false);
+        let child_row = rows
+            .iter()
+            .position(|r| r.thread_id.as_deref() == Some("child"))
+            .unwrap();
+        let mut ui = UiState {
+            hide_completed: true,
+            summary: Some(SummarySelection {
+                row: child_row,
+                ..SummarySelection::default()
+            }),
+            ..UiState::default()
+        };
+        ui.open_summary_agent(&state, false);
+        assert_eq!(ui.history.as_ref().unwrap().thread_id, "child");
+        assert!(ui.close_history());
+        ui.move_summary(&state, 0, false);
+        state
+            .agents
+            .get_mut("root")
+            .unwrap()
+            .metrics
+            .start_call("new_tool");
+        ui.open_summary_agent(&state, false);
+        assert_eq!(ui.history.as_ref().unwrap().thread_id, "child");
+        assert!(ui.close_history());
+        let rows = summary_rows(&state, Utc::now(), false);
+        ui.move_summary(&state, isize::MAX, false);
+        assert_eq!(ui.summary.as_ref().unwrap().index(&rows), rows.len() - 1);
+        ui.move_summary(&state, isize::MIN, false);
+        assert_eq!(ui.summary.as_ref().unwrap().row, 0);
+        for (width, height) in [(116, 30), (40, 10), (20, 4)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        &group,
+                        &state,
+                        &flatten(&group, &state, true),
+                        &ui,
+                        false,
+                        Palette::new(ColorMode::None),
+                    )
+                })
+                .unwrap();
+            assert_reset_colours(&terminal);
+            if width >= 40 {
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>();
+                assert!(text.contains("orchestration summary"));
+            }
+        }
+    }
+
+    #[test]
+    fn summary_labels_missing_tokens_partial_evidence_and_untrusted_roles() {
+        let (_, mut state) = fixture();
+        state.agents.get_mut("child").unwrap().agent_role = Some("worker\u{1b}[31m\nunsafe".into());
+        state
+            .agents
+            .get_mut("root")
+            .unwrap()
+            .metrics
+            .record_spawn("/root/missing");
+        let rows = summary_rows(&state, Utc::now(), true);
+        let text = rows
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Total n/a"));
+        assert!(text.contains("partial timing"));
+        assert!(text.contains("Known spawned children not discovered: 1"));
+        assert!(text.contains("Thinking time: unavailable"));
+        assert!(!text.contains('\u{1b}'));
+        assert_eq!(token_sum([Some(0), None].into_iter(), 2), "0 (1/2 agents)");
     }
 }

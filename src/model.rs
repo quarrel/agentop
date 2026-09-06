@@ -1,3 +1,4 @@
+use crate::summary::{CallKind, RunMetrics};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -80,6 +81,7 @@ pub struct InFlightCall {
     pub ordinal: Option<u64>,
     pub sequence: u64,
     pub interaction_sequence: u64,
+    pub timing_kind: CallKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +223,7 @@ pub struct AgentState {
     pub latest_turn: TurnState,
     pub last_activity_at: Option<DateTime<Utc>>,
     pub context_usage: Option<ContextUsage>,
+    pub metrics: RunMetrics,
     pub next_call_sequence: u64,
     pub in_flight_calls: HashMap<String, InFlightCall>,
     pub interactions: VecDeque<AgentInteraction>,
@@ -255,6 +258,7 @@ impl AgentState {
             latest_turn: TurnState::default(),
             last_activity_at: None,
             context_usage: None,
+            metrics: RunMetrics::default(),
             next_call_sequence: 0,
             in_flight_calls: HashMap::new(),
             interactions: VecDeque::new(),
@@ -365,6 +369,7 @@ impl AgentState {
         finished_at: Option<DateTime<Utc>>,
         state: ToolInteractionState,
     ) {
+        self.metrics.finish_call(&call, finished_at, state);
         if let Some(interaction) = self
             .interactions
             .iter_mut()
@@ -411,6 +416,7 @@ impl AgentState {
     }
 
     fn record_spawned_agent_hint(&mut self, hint: SpawnedAgentHint) {
+        self.metrics.record_spawn(&hint.agent_path);
         if self.spawned_agent_hints.len() == SPAWN_HINT_LIMIT {
             self.spawned_agent_hints.pop_front();
         }
@@ -1190,6 +1196,21 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
     let timestamp = parse_time(record.get("timestamp"));
     agent.last_ordinal = ordinal.or(agent.last_ordinal);
     let payload = &record["payload"];
+    let event_type = if record["type"] == "event_msg" {
+        payload["type"].as_str()
+    } else {
+        None
+    };
+    let accounting_time = match event_type {
+        Some("task_started") => parse_time(payload.get("started_at")).or(timestamp),
+        Some("task_complete") => parse_time(payload.get("completed_at")).or(timestamp),
+        _ => timestamp,
+    };
+    agent.metrics.advance(
+        accounting_time,
+        agent.latest_turn.status == TurnStatus::Running,
+        agent.in_flight_calls.values(),
+    );
     match record["type"].as_str() {
         Some("turn_context") => {
             if let Some(model) = payload.get("model").and_then(Value::as_str) {
@@ -1202,6 +1223,10 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
         }
         Some("event_msg") => match payload["type"].as_str() {
             Some("task_started") => {
+                agent.metrics.start_turn(
+                    accounting_time,
+                    agent.latest_turn.status == TurnStatus::Running,
+                );
                 agent.latest_turn = TurnState {
                     turn_id: payload
                         .get("turn_id")
@@ -1228,6 +1253,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 true
             }
             Some("task_complete") => {
+                agent.metrics.end_turn(accounting_time);
                 agent.latest_turn.status = TurnStatus::Completed;
                 agent.latest_turn.completed_at =
                     parse_time(payload.get("completed_at")).or(timestamp);
@@ -1256,6 +1282,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 true
             }
             Some("turn_aborted") => {
+                agent.metrics.end_turn(timestamp);
                 agent.latest_turn.status = TurnStatus::Interrupted;
                 agent.close_in_flight_calls(timestamp);
                 agent.last_activity_at = timestamp;
@@ -1268,6 +1295,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 true
             }
             Some("error") => {
+                agent.metrics.end_turn(timestamp);
                 agent.latest_turn.status = TurnStatus::Errored;
                 agent.close_in_flight_calls(timestamp);
                 agent.last_activity_at = timestamp;
@@ -1375,14 +1403,22 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                 true
             }
             Some("token_count") => {
+                agent.metrics.observe_tokens(payload);
                 if let Some(usage) =
                     parse_context_usage(payload, timestamp, agent.context_usage.as_ref())
                 {
+                    agent.metrics.peak_context_percent = Some(
+                        agent
+                            .metrics
+                            .peak_context_percent
+                            .map_or(usage.percent(), |old| old.max(usage.percent())),
+                    );
                     agent.context_usage = Some(usage);
                 }
                 true
             }
             Some("context_compacted") => {
+                agent.metrics.compactions += 1;
                 agent.context_usage = None;
                 agent.push_interaction(
                     InteractionKind::Context,
@@ -1422,6 +1458,36 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                         summary = sanitise_content(&format!("wait — {exec_summary}"));
                     }
                 }
+                let timing_kind = match tool_name.as_str() {
+                    "wait_agent" => CallKind::AgentWait,
+                    "wait" => CallKind::ExecWait,
+                    "write_stdin"
+                        if payload
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                            .is_some_and(|args| {
+                                args.get("chars").and_then(Value::as_str) == Some("")
+                            }) =>
+                    {
+                        CallKind::ExecWait
+                    }
+                    "exec"
+                        if parse_terminal_io_or_none(payload)
+                            .is_some_and(|io| io.kind == TerminalIoKind::Poll) =>
+                    {
+                        CallKind::ExecWait
+                    }
+                    _ => CallKind::Tool,
+                };
+                if let Some(previous) = agent.in_flight_calls.remove(&call_id) {
+                    agent.finish_tool_interaction(
+                        previous,
+                        timestamp,
+                        ToolInteractionState::EndedWithoutReturn,
+                    );
+                }
+                agent.metrics.start_call(&tool_name);
                 let interaction_sequence =
                     agent.start_tool_interaction(&summary, timestamp, ordinal);
                 agent.in_flight_calls.insert(
@@ -1433,6 +1499,7 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                         ordinal,
                         sequence,
                         interaction_sequence,
+                        timing_kind,
                     },
                 );
                 agent.last_activity_at = timestamp;
@@ -1476,6 +1543,8 @@ pub fn reduce(agent: &mut AgentState, record: &Value) -> bool {
                         ToolInteractionState::Returned
                     };
                     agent.finish_tool_interaction(call, timestamp, state);
+                } else {
+                    agent.metrics.unmatched_outputs += 1;
                 }
                 agent.last_activity_at = timestamp;
                 true

@@ -114,6 +114,10 @@ When you receive an inter-agent MESSAGE or FINAL_ANSWER:
 | Session browser | r | Refresh the session list |
 | Agent tree | ↑/↓ or j/k | Select an agent |
 | Agent tree | Enter | Open the selected agent's interaction history |
+| Agent tree | s | Open the whole-orchestration summary |
+| Summary | ↑/↓ or j/k, PgUp/PgDn | Scroll totals, roles, tools and agents |
+| Summary | Enter on an agent row | Open that agent's interactions |
+| Summary | s or Esc | Return to the agent tree |
 | Agent tree | h | Hide or show completed agents |
 | Agent tree | r | Rescan for rollout updates and new agents |
 | Interaction history | ↑/↓ or j/k | Move through retained interactions |
@@ -140,6 +144,16 @@ Agentop reports the latest observed turn lifecycle:
 For active agents, `CTX n%` is the latest observed request input count divided by the reported model context window. It is not a live counter. Yellow begins at 70% and red at 85%. Completed and stale agents omit context pressure because it is no longer actionable. Cumulative token usage is labelled separately and is never treated as current context occupancy.
 
 The interaction view retains bounded, sanitised lifecycle, message, reasoning, communication, context-management, and paired tool-call summaries. It does not retain raw tool inputs or outputs.
+
+## Orchestration summary
+
+Press `s` in the agent tree to inspect the root and all discovered agents, including hidden completed agents. The live summary shows elapsed run span, summed agent turn time, role totals, reported token counters, tool call counts and latencies, waits for agents and execution, concurrency, context peaks, compactions and evidence gaps. Scroll to an agent and press Enter to inspect its interactions; Esc returns to the summary.
+
+Elapsed span includes gaps between turns. Summed agent time includes overlapping work and can exceed elapsed time. Tool time is the union of open calls within each agent's turns; agent waits and execution waits are overlapping subsets. Execution waits include `wait` calls and recognised empty terminal polls. Tool latency measures the recorded call/return boundary, not the full lifetime of a background command or tools nested inside an execution wrapper. Time outside tools is unattributed: it is **not measured thinking time**.
+
+Tokens are the latest reported cumulative counters from each agent's own retained history boundary, with coverage shown for each field. Snapshots are not added together; cached input and reasoning output are subsets, not extra tokens. Producer counters may include inherited baselines or decrease after a reset, so summed reported counters are not a unique-run or billing total. Compaction does not erase these measurements.
+
+Totals remain partial while history loads or evidence is missing. Stale agents are not extrapolated to the current time. Concurrency counts running turns, including waits, and is unavailable when timing evidence is incomplete or its bounded interval catalogue is exceeded. Diagnostics identify evidence to inspect, not a claim about the cause of slow or failed work.
 
 ## Compatibility and schema catalogue
 

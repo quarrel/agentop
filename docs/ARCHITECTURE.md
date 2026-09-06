@@ -23,6 +23,7 @@ The main modules are:
 - `src/main.rs`: command-line parsing, path resolution, and application entry points.
 - `src/rollout.rs`: discovery, grouping, selection, admission, incremental reads, and work budgets.
 - `src/model.rs`: projected session/agent state and deterministic record reduction.
+- `src/summary.rs`: cumulative run accounting, timing coverage and concurrency projection.
 - `src/ui.rs`: terminal lifecycle, event loop, navigation, rendering, and sanitisation.
 - `src/schema.rs`: embedded and user schema-catalogue loading.
 - `src/schema_sync.rs`: the explicit networked `build-schema` maintenance command.
@@ -91,6 +92,14 @@ Malformed, incomplete, oversized, unknown, or non-covering snapshots provide no 
 A valid `token_count` observation supplies current request input tokens and a non-zero model context window. Agentop stores the latest observation and previous input count for a delta. Cached input, output, reasoning output, and cumulative usage remain separately labelled accounting values.
 
 A `context_compacted` event clears the superseded occupancy observation and adds an interaction entry. It does not reveal how many tokens were removed. Context pressure is shown only for active, non-stale agents.
+
+### Run accounting
+
+Per-agent summary measurements accumulate after the same own-history boundary as semantic reduction, independently of the bounded interaction deque. Turn starts and terminal events delimit observed running time; between monotonic timestamps, open-call state accounts for the union of tool time and the separate, potentially overlapping agent-wait and execution-wait subsets. Missing or reversed timestamps create coverage gaps. Rendering may extrapolate an open, non-stale turn to now only after catch-up; it does not mutate stored accounting. Time outside calls is unattributed, never labelled measured thinking time.
+
+Call counts and paired latencies include only outer calls recognised by the reducer. Yielding closes that call's measured latency, not the background operation. Calls closed without a return and unmatched outputs remain separate diagnostics. Tool aggregates retain at most 128 distinct bounded names plus an overflow bucket. Up to 4,096 timestamp-only turn intervals per agent support a sweep of half-open intervals for peak concurrency; exceeding the cap suppresses concurrency rather than reporting a partial peak. Accumulated durations and counts continue beyond that cap. Average concurrency is summed turn time divided by the whole elapsed span, including gaps between turns. Up to 1,024 distinct bounded spawned-agent paths per agent support missing-child diagnostics independently of the transient discovery-hint queue; dropped hints are counted.
+
+Token accounting retains the latest reported cumulative snapshot separately from current context occupancy. Optional fields remain absent rather than zero. Repeated snapshots are not summed, decreases are diagnosed rather than guessed to be resets, and compactions preserve totals and high-water context pressure. A child-owned snapshot may still contain a producer-inherited baseline; aggregate reported counters explicitly do not claim unique-run cost. All metrics cover discovered rollouts only and report partial loading, missing lifecycle evidence and data-health observations.
 
 ## Presentation and retained interactions
 
